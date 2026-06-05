@@ -255,7 +255,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v7';
+const APP_VERSION = 'v8';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH = sessionStorage.getItem('p25_auth') || '';
@@ -330,21 +330,30 @@ function agencyLabel(agency) {
 
 function renderFeed() {
   const feed = document.getElementById('feed');
-  const empty = document.getElementById('empty-state');
   const visible = entriesLatest;
 
   if (!visible.length) {
-    empty.style.display = 'flex';
-    feed.innerHTML = '';
-    feed.appendChild(empty);
+    feed.dataset.newestId = '';
+    feed.innerHTML = `
+      <div class="empty-state" style="display:flex">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M8.288 15.038a5.25 5.25 0 017.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0M12 20.25h.008v.008H12v-.008z"/>
+        </svg>
+        <div>No traffic yet</div>
+        <div style="font-size:12px">Waiting for OP25 transmissions...</div>
+      </div>`;
     return;
   }
-  empty.style.display = 'none';
 
   feed.dataset.newestId = visible[0]?.id || '';
-  feed.innerHTML = `<div class="feed-list" data-rendered-at="${Date.now()}">
-    ${visible.map(entryHtml).join('')}
-  </div>`;
+  feed.innerHTML = '';
+  const list = document.createElement('div');
+  list.className = 'feed-list';
+  list.dataset.renderedAt = `${Date.now()}`;
+  for (const entry of visible) {
+    list.appendChild(entry.type === 'summary' ? makeSummaryCard(entry) : makeTxCard(entry));
+  }
+  feed.appendChild(list);
   feed.scrollTop = 0;
 }
 
@@ -532,7 +541,8 @@ function setView(view, updateHash = false) {
   });
   document.getElementById('feed').style.display = currentView === 'feed' ? 'block' : 'none';
   document.getElementById('incidents').style.display = currentView === 'incidents' ? 'block' : 'none';
-  document.querySelector('.filter-tabs').style.display = currentView === 'feed' ? 'flex' : 'none';
+  const filters = document.querySelector('.filter-tabs');
+  if (filters) filters.style.display = currentView === 'feed' ? 'flex' : 'none';
   if (updateHash) location.hash = currentView === 'incidents' ? 'incidents' : '';
 }
 
