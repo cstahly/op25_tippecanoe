@@ -280,6 +280,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <button class="view-tab active" data-view="feed">Log</button>
         <button class="view-tab" data-view="incidents">Incidents</button>
       </div>
+      <button class="icon-btn" id="audio-btn" title="Listen live">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+          <path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/>
+        </svg>
+      </button>
       <button class="icon-btn" id="download-btn" title="Download raw log">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
@@ -345,7 +351,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v13';
+const APP_VERSION = 'v14';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -868,6 +874,42 @@ document.getElementById('download-btn').onclick = async () => {
     alert('Download failed: ' + e.message);
   } finally {
     btn.disabled = false;
+  }
+};
+
+// ── Live audio ────────────────────────────────────────────────────────────────
+let _audioEl = null;
+
+document.getElementById('audio-btn').onclick = async () => {
+  const btn = document.getElementById('audio-btn');
+  if (_audioEl) {
+    _audioEl.pause();
+    _audioEl.src = '';
+    _audioEl = null;
+    btn.style.color = '';
+    btn.title = 'Listen live';
+    return;
+  }
+  try {
+    let token;
+    if (typeof TOKEN !== 'undefined' && TOKEN) {
+      token = TOKEN;
+    } else {
+      const r = await fetch('/api/audio/token', { headers: authHeader(), cache: 'no-store' });
+      if (!r.ok) throw new Error('Could not get audio token');
+      token = (await r.json()).token;
+    }
+    _audioEl = new Audio(`/api/audio?t=${encodeURIComponent(token)}`);
+    _audioEl.onended = _audioEl.onerror = () => {
+      _audioEl = null;
+      btn.style.color = '';
+      btn.title = 'Listen live';
+    };
+    await _audioEl.play();
+    btn.style.color = 'var(--police)';
+    btn.title = 'Stop listening';
+  } catch (e) {
+    alert('Audio failed: ' + e.message);
   }
 };
 

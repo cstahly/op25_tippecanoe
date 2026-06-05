@@ -8,7 +8,7 @@ import base64, hashlib, hmac, os, re, json, asyncio, secrets, time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Set
 
 import anthropic
 from fastapi import FastAPI, Depends, HTTPException, Request
@@ -16,8 +16,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-LOG_FILE = Path.home() / "op25_tippecanoe/p25_log.txt"
-STATIC   = Path(__file__).parent / "static"
+LOG_FILE    = Path.home() / "op25_tippecanoe/p25_log.txt"
+STATIC      = Path(__file__).parent / "static"
+AUDIO_FIFO  = "/tmp/p25_audio.fifo"
 
 USERNAME = os.environ.get("P25_USER", "p25")
 PASSWORD = os.environ.get("P25_PASSWORD", "scanner")
@@ -28,6 +29,37 @@ RATE_LIMITS: dict[str, float] = {}
 TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
 
 app = FastAPI()
+
+_audio_subs: Set[asyncio.Queue] = set()
+_audio_lock  = asyncio.Lock()
+
+async def _audio_broadcast_loop():
+    while True:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-loglevel", "quiet",
+                "-f", "s16le", "-ar", "8000", "-ac", "1", "-i", AUDIO_FIFO,
+                "-c:a", "libmp3lame", "-b:a", "32k", "-f", "mp3", "-",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                async with _audio_lock:
+                    for q in list(_audio_subs):
+                        try:
+                            q.put_nowait(chunk)
+                        except asyncio.QueueFull:
+                            pass
+        except Exception:
+            pass
+        await asyncio.sleep(3)
+
+@app.on_event("startup")
+async def _startup():
+    asyncio.create_task(_audio_broadcast_loop())
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
@@ -111,6 +143,18 @@ def _load_users() -> dict[str, dict]:
 
 def require_auth(request: Request):
     users = _load_users()
+
+    t = request.query_params.get("t", "").strip()
+    if t:
+        username = _verify_login_token(t)
+        user = users.get(username)
+        if user:
+            return {
+                "username": username,
+                "summarize_interval_seconds": int(user.get("summarize_interval_seconds", DEFAULT_SUMMARY_LIMIT)),
+                "auth_mode": "bearer",
+            }
+
     auth_header = request.headers.get("authorization", "").strip()
 
     if auth_header.lower().startswith("bearer "):
@@ -548,6 +592,30 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         yield f"data: {json.dumps({'done':True,'time':ts,'text':full.strip()})}\n\n"
 
     return StreamingResponse(stream_summary(), media_type="text/event-stream",
+                             headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+@app.get("/api/audio/token")
+def audio_token(auth: dict = Depends(require_auth)):
+    token, exp = _make_login_token(auth["username"], ttl_seconds=3600)
+    return JSONResponse({"token": token,
+                         "expires_at": datetime.fromtimestamp(exp).isoformat(timespec="seconds")})
+
+@app.get("/api/audio")
+async def audio_stream(auth: dict = Depends(require_auth)):
+    q: asyncio.Queue = asyncio.Queue(maxsize=64)
+    async with _audio_lock:
+        _audio_subs.add(q)
+    async def generate():
+        try:
+            while True:
+                chunk = await asyncio.wait_for(q.get(), timeout=30)
+                yield chunk
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            async with _audio_lock:
+                _audio_subs.discard(q)
+    return StreamingResponse(generate(), media_type="audio/mpeg",
                              headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 app.mount("/", StaticFiles(directory=str(STATIC), html=True), name="static")
