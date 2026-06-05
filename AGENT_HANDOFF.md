@@ -12,7 +12,7 @@ box with `bypassPermissions` mode enabled in Claude Code. Full sudo. RDP access.
 | **P25 decoder (OP25)** | Operational | Decoding Tippecanoe County traffic |
 | **Whisper STT** | Operational | `turbo` model, CPU, int8 |
 | **p25_summarize.py** | Operational | On-demand Claude summary, press Enter |
-| **p25_server.py (web app)** | Built, NOT deployed | Needs nginx + systemd |
+| **p25_server.py (web app)** | Deployed on HTTP | systemd + nginx running; HTTPS waits for DNS |
 | **Satellite scheduler** | **PAUSED** | All rules `"enabled": false` |
 | **ATC reception** | Manual only | Working command, not scheduled |
 
@@ -84,7 +84,7 @@ encoding and Whisper will make the RDP session unusable even when CPU is idle.
 
 ---
 
-## 3. P25 Web App — Needs Deployment
+## 3. P25 Web App — Deployment
 
 ### What it does
 
@@ -103,29 +103,21 @@ cd ~/op25_tippecanoe
 P25_PASSWORD=yourpassword python3 -m uvicorn p25_server:app --host 0.0.0.0 --port 8765
 ```
 
-### What still needs to be done
+### Current deployment state
 
-1. **nginx reverse proxy** — SSL termination for p25.sadbabyrabbit.com → localhost:8765
-2. **systemd service** — so p25_server starts on boot and restarts on crash
-3. **DNS** — user needs to point p25.sadbabyrabbit.com A record at this machine's IP
+- **systemd**: `p25-server.service` enabled/running, reads `/etc/p25-server.env`
+- **nginx**: enabled/running, proxies `p25.sadbabyrabbit.com` on port 80 → `127.0.0.1:8765`
+- **DNS needed**: add `p25 A 104.218.151.49`
+- **HTTPS still needed**: once DNS resolves, run certbot and switch to the SSL nginx config
 
-Sample nginx config to write:
+HTTP nginx config:
 ```nginx
 server {
     listen 80;
     server_name p25.sadbabyrabbit.com;
-    return 301 https://$host$request_uri;
-}
-server {
-    listen 443 ssl;
-    server_name p25.sadbabyrabbit.com;
-    ssl_certificate     /etc/letsencrypt/live/p25.sadbabyrabbit.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/p25.sadbabyrabbit.com/privkey.pem;
     location / {
         proxy_pass http://127.0.0.1:8765;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         # Required for SSE:
         proxy_buffering off;
@@ -136,7 +128,12 @@ server {
 }
 ```
 
-Sample systemd unit to write at `/etc/systemd/system/p25-server.service`:
+HTTPS command to run after DNS resolves:
+```bash
+sudo certbot --nginx -d p25.sadbabyrabbit.com
+```
+
+systemd unit at `/etc/systemd/system/p25-server.service`:
 ```ini
 [Unit]
 Description=P25 Web App
@@ -224,7 +221,7 @@ Change `-f` for other frequencies. The v-dipole antenna works for this.
 
 ## 8. Pending Work
 
-1. **Deploy the web app** — nginx + certbot + systemd for p25.sadbabyrabbit.com (highest priority)
+1. **Finish HTTPS** — add DNS `p25 A 104.218.151.49`, then run certbot for p25.sadbabyrabbit.com
 2. **Mast/coax planning** — user wants 3 antennas on a mast (v-dipole + Arrow Yagi + ?), 3 coax runs
 3. **Satellite scheduler** — re-enable when user is ready to resume sat work
 4. **P25 improvements** (future, explicitly deferred):
