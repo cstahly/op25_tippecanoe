@@ -567,9 +567,12 @@ Use one markdown section per incident with this shape:
 ### INCIDENT N: Short incident title
 - Agency: agency or agencies
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
-- Location: best known location, or Unknown
+- Location: pure mappable address/place only, or Unknown. Do not add context, explanations, parentheticals, routes, or "near..." guesses here.
 - Details: concise update
 - Action: what remains unresolved or what to watch for
+
+Put any local context, landmark explanation, uncertainty, or secondary locations in Details, not Location. \
+Location is used directly as a map link label and query, so keep it clean and exact.
 
 Use stable incident titles when an older incident is still being updated. \
 Note any unresolved situations. Be direct and concise."""
