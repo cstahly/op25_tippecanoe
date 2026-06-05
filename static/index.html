@@ -57,7 +57,8 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
          gap: 12px; flex-shrink: 0; position: sticky; top: 0; z-index: 10; }
 .header-title { font-size: 15px; font-weight: 700; letter-spacing: .3px; flex: 1; }
 .header-title span { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
-.update-status { color: var(--muted); font-family: monospace; font-size: 11px; white-space: nowrap; }
+.update-status { color: var(--muted); font-family: monospace; font-size: 11px; max-width: 280px;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ems);
             animation: pulse 2s infinite; }
 .live-dot.dead { background: var(--fire); animation: none; }
@@ -82,13 +83,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 #feed, #incidents { flex: 1; overflow-y: auto; padding: 12px 16px 180px; }
 #incidents { display: none; }
 
-.incident-group { margin-bottom: 20px; }
-.incident-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-.incident-time { font-size: 11px; color: var(--muted); font-family: monospace; }
-.incident-line { flex: 1; height: 1px; background: var(--border); }
-.incident-badge { font-size: 10px; color: var(--muted); background: var(--surface);
-                  border: 1px solid var(--border); border-radius: 10px; padding: 2px 8px;
-                  white-space: nowrap; }
+.feed-list { display: grid; gap: 6px; }
 
 /* ── TX card ── */
 .tx-card { background: var(--surface); border: 1px solid var(--border);
@@ -345,46 +340,13 @@ function renderFeed() {
   }
   empty.style.display = 'none';
 
-  // Group into incident clusters (> 5 min gap = new group)
-  const groups = [];
-  let cur = null;
-  for (const entry of visible) {
-    if (entry.type === 'summary') {
-      if (cur) { groups.push(cur); cur = null; }
-      groups.push({ kind: 'summary', entry });
-      continue;
-    }
-    const mins = timeToMins(entry.time);
-    if (!cur || Math.abs(mins - cur.endMins) > 5) {
-      if (cur) groups.push(cur);
-      cur = { kind: 'group', startTime: entry.time, latestTime: entry.time, endMins: mins, entries: [] };
-    }
-    cur.entries.push(entry);
-    cur.endMins = mins;
-    cur.latestTime = entry.time;
-  }
-  if (cur) groups.push(cur);
-
   feed.innerHTML = '';
-  for (const g of [...groups].reverse()) {
-    if (g.kind === 'summary') {
-      feed.appendChild(makeSummaryCard(g.entry));
-    } else {
-      const div = document.createElement('div');
-      div.className = 'incident-group';
-      const agencies = [...new Set(g.entries.map(e => e.agency))];
-      const label = agencies.map(a => agencyLabel(a)).join(' · ');
-      div.innerHTML = `
-        <div class="incident-header">
-          <div class="incident-line"></div>
-          <div class="incident-time">${g.latestTime}</div>
-          <div class="incident-badge">${label}</div>
-          <div class="incident-line"></div>
-        </div>`;
-      for (const e of [...g.entries].reverse()) div.appendChild(makeTxCard(e));
-      feed.appendChild(div);
-    }
+  const list = document.createElement('div');
+  list.className = 'feed-list';
+  for (const entry of [...visible].reverse()) {
+    list.appendChild(entry.type === 'summary' ? makeSummaryCard(entry) : makeTxCard(entry));
   }
+  feed.appendChild(list);
 
   feed.scrollTop = 0;
 }
@@ -473,14 +435,6 @@ function escHtml(t) {
   return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-function entryKey(e) {
-  return [e.type, e.time, e.talkgroup || '', e.text || ''].join('|');
-}
-
-function entriesSignature(list) {
-  return list.map(entryKey).join('\n');
-}
-
 async function syncEntries() {
   const dot = document.getElementById('live-dot');
   const status = document.getElementById('update-status');
@@ -488,9 +442,11 @@ async function syncEntries() {
     const r = await fetch('/api/state', { headers: authHeader(), cache: 'no-store' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const state = await r.json();
+    const latest = (state.entries || []).at(-1);
     const sig = JSON.stringify({
-      entries: entriesSignature(state.entries || []),
-      incidents: state.incidents || [],
+      count: (state.entries || []).length,
+      latest: latest ? [latest.type, latest.time, latest.talkgroup || '', latest.text || ''] : [],
+      incident_count: (state.incidents || []).length,
       log_size: state.log_size,
       log_mtime: state.log_mtime,
     });
@@ -502,7 +458,9 @@ async function syncEntries() {
       renderIncidents();
     }
     dot.classList.remove('dead');
-    status.textContent = `${new Date().toLocaleTimeString()} · ${entries.length}`;
+    const newest = entries[entries.length - 1];
+    const newestLabel = newest ? `${newest.time} ${newest.text || newest.type}` : 'empty';
+    status.textContent = `${entries.length} · ${newestLabel}`;
     return true;
   } catch (e) {
     dot.classList.add('dead');
@@ -623,9 +581,11 @@ summaryRun.onclick = async () => {
 function init(data) {
   entries = Array.isArray(data) ? data : (data.entries || []);
   incidents = Array.isArray(data) ? [] : (data.incidents || []);
+  const latest = entries.at(-1);
   lastStateSig = JSON.stringify({
-    entries: entriesSignature(entries),
-    incidents,
+    count: entries.length,
+    latest: latest ? [latest.type, latest.time, latest.talkgroup || '', latest.text || ''] : [],
+    incident_count: incidents.length,
     log_size: Array.isArray(data) ? 0 : data.log_size,
     log_mtime: Array.isArray(data) ? 0 : data.log_mtime,
   });
