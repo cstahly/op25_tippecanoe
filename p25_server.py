@@ -358,6 +358,13 @@ def get_state():
         "log_mtime": stat.st_mtime if stat else 0,
     }, headers={"Cache-Control": "no-store"})
 
+@app.get("/api/logs/download")
+def download_logs(auth: dict = Depends(require_auth)):
+    if not LOG_FILE.exists():
+        raise HTTPException(404, detail="Log file not found")
+    filename = f"p25_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    return FileResponse(LOG_FILE, media_type="text/plain", filename=filename)
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "log_exists": LOG_FILE.exists()}

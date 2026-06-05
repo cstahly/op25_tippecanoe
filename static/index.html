@@ -280,6 +280,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <button class="view-tab active" data-view="feed">Log</button>
         <button class="view-tab" data-view="incidents">Incidents</button>
       </div>
+      <button class="icon-btn" id="download-btn" title="Download raw log">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+      </button>
       <button class="icon-btn" id="share-btn" title="Share login QR" style="display:none">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
@@ -339,7 +345,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v12';
+const APP_VERSION = 'v13';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -838,6 +844,30 @@ summaryRun.onclick = async () => {
     summaryOut.textContent = 'Error: ' + e.message;
     summaryRun.textContent = 'Summarize';
     summaryRun.disabled = false;
+  }
+};
+
+// ── Download logs ─────────────────────────────────────────────────────────────
+document.getElementById('download-btn').onclick = async () => {
+  const btn = document.getElementById('download-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/logs/download', { headers: authHeader() });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const blob = await r.blob();
+    const disposition = r.headers.get('content-disposition') || '';
+    const nameMatch = disposition.match(/filename="?([^"]+)"?/);
+    const filename = nameMatch ? nameMatch[1] : 'p25_log.txt';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Download failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
   }
 };
 
