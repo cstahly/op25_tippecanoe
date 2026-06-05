@@ -21,7 +21,7 @@
     "devices": [
         {
             "args": "hackrf=0",
-            "gains": "RF:14,IF:16,BB:20",
+            "gains": "RF:14,IF:16,BB:32",
             "name": "hackrf0",
             "offset": 25000,
             "ppm": 0.0,
