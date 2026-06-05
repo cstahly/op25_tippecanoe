@@ -23,7 +23,7 @@ USERNAME = os.environ.get("P25_USER", "p25")
 PASSWORD = os.environ.get("P25_PASSWORD", "scanner")
 SUMMARY_MARKER = "=== SUMMARY ==="
 DEFAULT_SUMMARY_LIMIT = 0
-DEFAULT_SHARE_TOKEN_SECONDS = 24 * 60 * 60
+DEFAULT_SHARE_TOKEN_SECONDS = 14 * 24 * 60 * 60
 RATE_LIMITS: dict[str, float] = {}
 TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
 
@@ -449,7 +449,7 @@ def share_login(req: ShareLoginReq, request: Request, auth: dict = Depends(requi
     users = _load_users()
     if target not in users:
         raise HTTPException(400, detail=f"Unknown user: {target}")
-    ttl = max(300, min(int(req.ttl_seconds or DEFAULT_SHARE_TOKEN_SECONDS), 7 * 24 * 60 * 60))
+    ttl = max(300, min(int(req.ttl_seconds or DEFAULT_SHARE_TOKEN_SECONDS), 30 * 24 * 60 * 60))
     token, exp = _make_login_token(target, ttl)
     share_path = f"/?token={token}"
     share_url = f"{_public_base_url(request)}{share_path}"

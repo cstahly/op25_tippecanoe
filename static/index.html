@@ -873,14 +873,14 @@ document.getElementById('share-btn').onclick = async () => {
     const r = await fetch('/api/login/share', {
       method: 'POST',
       headers: { ...authHeader(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ttl_seconds: 86400, for_username: sel.value }),
+      body: JSON.stringify({ ttl_seconds: 14 * 24 * 60 * 60, for_username: sel.value }),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     qrImg.src  = data.qr_data_url;
     urlEl.textContent  = data.url;
-    title.textContent  = `${data.username} · expires ${data.expires_at.slice(11, 16)}`;
-    metaEl.textContent = 'Scan to log in. Valid for 24 hours.';
+    title.textContent  = `${data.username} · expires ${data.expires_at.slice(0, 10)}`;
+    metaEl.textContent = 'Scan to log in. Valid for 2 weeks.';
     copyBtn.onclick = () => {
       navigator.clipboard.writeText(data.url).then(() => {
         copyBtn.textContent = 'Copied!';
