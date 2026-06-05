@@ -64,6 +64,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .live-dot.dead { background: var(--fire); animation: none; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 
+.header-controls { display: flex; align-items: center; gap: 8px; }
 .view-tabs { display: flex; gap: 4px; background: var(--bg); border: 1px solid var(--border);
              border-radius: 8px; padding: 3px; }
 .view-tab { background: transparent; border: 0; border-radius: 5px; color: var(--muted);
@@ -190,9 +191,10 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   header { align-items: stretch; flex-wrap: wrap; height: auto; padding: 8px 10px; }
   .header-title { min-width: 180px; }
   .update-status { margin-left: auto; }
-  .view-tabs { order: 3; width: 100%; }
+  .header-controls { order: 3; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .view-tabs { min-width: 132px; }
   .view-tab { flex: 1; }
-  .filter-tabs { order: 4; width: 100%; overflow-x: auto; }
+  .filter-tabs { overflow-x: auto; }
   #feed, #incidents { padding: 10px 10px 220px; }
   .summary-dock-inner { grid-template-columns: 1fr; }
   .summary-run { width: 100%; }
@@ -219,15 +221,17 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
     <div class="live-dot" id="live-dot"></div>
     <div class="header-title">P25 Monitor <span>Tippecanoe County</span></div>
     <div class="update-status" id="update-status">starting</div>
-    <div class="view-tabs">
-      <button class="view-tab active" data-view="feed">Log</button>
-      <button class="view-tab" data-view="incidents">Incidents</button>
-    </div>
-    <div class="filter-tabs">
-      <button class="filter-tab active" data-filter="all">All</button>
-      <button class="filter-tab" data-filter="police">Police</button>
-      <button class="filter-tab" data-filter="fire">Fire</button>
-      <button class="filter-tab" data-filter="ems">EMS</button>
+    <div class="header-controls">
+      <div class="filter-tabs">
+        <button class="filter-tab active" data-filter="all">All</button>
+        <button class="filter-tab" data-filter="police">Police</button>
+        <button class="filter-tab" data-filter="fire">Fire</button>
+        <button class="filter-tab" data-filter="ems">EMS</button>
+      </div>
+      <div class="view-tabs">
+        <button class="view-tab active" data-view="feed">Log</button>
+        <button class="view-tab" data-view="incidents">Incidents</button>
+      </div>
     </div>
   </header>
 
@@ -255,7 +259,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH = sessionStorage.getItem('p25_auth') || '';
@@ -330,7 +334,9 @@ function agencyLabel(agency) {
 
 function renderFeed() {
   const feed = document.getElementById('feed');
-  const visible = entriesLatest;
+  const visible = entriesLatest.filter(entry =>
+    filter === 'all' || entry.type === 'summary' || entry.agency === filter
+  );
 
   if (!visible.length) {
     feed.dataset.newestId = '';
@@ -402,17 +408,18 @@ function makeIncidentCard(incident) {
 function makeTxCard(entry) {
   const card = document.createElement('div');
   card.className = 'tx-card';
-  card.dataset.agency = entry.agency;
-  card.dataset.id = entry.id;
-  const long = entry.text.length > 120;
+  card.dataset.agency = entry.agency || 'other';
+  card.dataset.id = entry.id || '';
+  const text = entry.text || '';
+  const long = text.length > 120;
   if (long) card.classList.add('has-more');
   card.innerHTML = `
     <div class="tx-card-inner">
       <div class="tx-meta">
-        <span class="tg-badge" data-agency="${entry.agency}">${entry.talkgroup}</span>
-        <span class="tx-time">${entry.time}</span>
+        <span class="tg-badge" data-agency="${escHtml(entry.agency || 'other')}">${escHtml(entry.talkgroup || 'Unknown')}</span>
+        <span class="tx-time">${escHtml(entry.time || '')}</span>
       </div>
-      <div class="tx-text${long ? ' truncated' : ''}">${escHtml(entry.text)}</div>
+      <div class="tx-text${long ? ' truncated' : ''}">${escHtml(text)}</div>
       ${long ? '<div class="tx-expand">tap to expand ↓</div>' : ''}
     </div>`;
   card.onclick = () => {
@@ -424,42 +431,16 @@ function makeTxCard(entry) {
   return card;
 }
 
-function entryHtml(entry) {
-  if (entry.type === 'summary') {
-    return `
-      <div class="summary-card" data-id="${escHtml(entry.id)}">
-        <div class="summary-header">
-          <span class="summary-label">AI SUMMARY</span>
-          <span class="summary-time">${escHtml(entry.time)}</span>
-        </div>
-        <div class="summary-text">${escHtml(entry.text || '')}</div>
-      </div>`;
-  }
-  const text = entry.text || '';
-  const long = text.length > 120;
-  return `
-    <div class="tx-card${long ? ' has-more' : ''}" data-agency="${escHtml(entry.agency || 'other')}" data-id="${escHtml(entry.id || '')}">
-      <div class="tx-card-inner">
-        <div class="tx-meta">
-          <span class="tg-badge" data-agency="${escHtml(entry.agency || 'other')}">${escHtml(entry.talkgroup || 'Unknown')}</span>
-          <span class="tx-time">${escHtml(entry.time || '')}</span>
-        </div>
-        <div class="tx-text${long ? ' truncated' : ''}">${escHtml(text)}</div>
-        ${long ? '<div class="tx-expand">tap to expand</div>' : ''}
-      </div>
-    </div>`;
-}
-
 function makeSummaryCard(entry) {
   const card = document.createElement('div');
   card.className = 'summary-card';
-  card.dataset.id = entry.id;
+  card.dataset.id = entry.id || '';
   card.innerHTML = `
     <div class="summary-header">
       <span class="summary-label">AI SUMMARY</span>
-      <span class="summary-time">${entry.time}</span>
+      <span class="summary-time">${escHtml(entry.time || '')}</span>
     </div>
-    <div class="summary-text">${escHtml(entry.text)}</div>`;
+    <div class="summary-text">${escHtml(entry.text || '')}</div>`;
   return card;
 }
 
@@ -513,8 +494,8 @@ function startPolling() {
 document.querySelectorAll('.filter-tab').forEach(btn => {
   btn.onclick = () => {
     document.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'));
-    document.querySelector('.filter-tab[data-filter="all"]').classList.add('active');
-    filter = 'all';
+    btn.classList.add('active');
+    filter = btn.dataset.filter;
     renderFeed();
   };
 });
@@ -541,8 +522,6 @@ function setView(view, updateHash = false) {
   });
   document.getElementById('feed').style.display = currentView === 'feed' ? 'block' : 'none';
   document.getElementById('incidents').style.display = currentView === 'incidents' ? 'block' : 'none';
-  const filters = document.querySelector('.filter-tabs');
-  if (filters) filters.style.display = currentView === 'feed' ? 'flex' : 'none';
   if (updateHash) location.hash = currentView === 'incidents' ? 'incidents' : '';
 }
 
