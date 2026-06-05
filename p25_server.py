@@ -88,6 +88,15 @@ def read_since_last_summary() -> list[str]:
 def get_entries():
     return parse_log()
 
+@app.get("/api/state", dependencies=[Depends(require_auth)])
+def get_state():
+    stat = LOG_FILE.stat() if LOG_FILE.exists() else None
+    return {
+        "entries": parse_log(),
+        "log_size": stat.st_size if stat else 0,
+        "log_mtime": stat.st_mtime if stat else 0,
+    }
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "log_exists": LOG_FILE.exists()}
@@ -156,16 +165,26 @@ async def summarize(req: SummarizeReq):
     prompt       = PROMPT_TEMPLATE.format(note_section=note_section, block=block)
 
     async def stream_summary() -> AsyncGenerator[str, None]:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            msg = "ANTHROPIC_API_KEY is not set for p25-server.service."
+            yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
+            return
+
         client = anthropic.AsyncAnthropic()
         full   = ""
-        async with client.messages.stream(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=512,
-            messages=[{"role":"user","content":prompt}],
-        ) as s:
-            async for chunk in s.text_stream:
-                full += chunk
-                yield f"data: {json.dumps({'text':chunk})}\n\n"
+        try:
+            async with client.messages.stream(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=512,
+                messages=[{"role":"user","content":prompt}],
+            ) as s:
+                async for chunk in s.text_stream:
+                    full += chunk
+                    yield f"data: {json.dumps({'text':chunk})}\n\n"
+        except Exception as exc:
+            msg = f"Summary failed: {exc}"
+            yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
+            return
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(LOG_FILE, "a") as f:

@@ -72,7 +72,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .filter-tab[data-filter="ems"].active     { color: var(--ems);    border-color: var(--ems);    }
 
 /* ── Feed ── */
-#feed { flex: 1; overflow-y: auto; padding: 12px 16px 80px; }
+#feed { flex: 1; overflow-y: auto; padding: 12px 16px 180px; }
 
 .incident-group { margin-bottom: 20px; }
 .incident-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
@@ -120,58 +120,41 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .summary-text { padding: 8px 14px 12px; font-size: 13px; line-height: 1.65;
                 color: var(--text); white-space: pre-wrap; }
 
-/* ── Summarize button ── */
-#summarize-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
-                 padding: 12px 16px; background: linear-gradient(transparent, var(--bg) 40%);
-                 pointer-events: none; }
-#summarize-btn { pointer-events: all; width: 100%; max-width: 480px;
-                 margin: 0 auto; display: block; background: var(--surface2);
-                 border: 1px solid var(--border); border-radius: 10px;
-                 color: var(--text); padding: 13px; font-size: 14px; font-weight: 600;
-                 cursor: pointer; display: flex; align-items: center; justify-content: center;
-                 gap: 8px; transition: background .15s; }
-#summarize-btn:hover { background: var(--surface); border-color: var(--summary); color: var(--summary); }
-#summarize-btn svg { width: 16px; height: 16px; }
-
-/* ── Modal ── */
-.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.7);
-                  z-index: 100; display: none; align-items: flex-end;
-                  justify-content: center; padding: 16px; }
-.modal-backdrop.open { display: flex; }
-.modal { background: var(--surface); border: 1px solid var(--border);
-         border-radius: 14px; width: 100%; max-width: 520px; overflow: hidden; }
-.modal-header { display: flex; align-items: center; padding: 16px 18px 12px;
-                border-bottom: 1px solid var(--border); }
-.modal-title { font-weight: 600; font-size: 15px; flex: 1; }
-.modal-close { background: none; border: none; color: var(--muted); cursor: pointer;
-               font-size: 20px; line-height: 1; padding: 0 4px; }
-.modal-close:hover { color: var(--text); }
-.modal-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
-.modal-label { font-size: 12px; color: var(--muted); font-weight: 500; }
-.modal-textarea { background: var(--bg); border: 1px solid var(--border);
-                  border-radius: 8px; color: var(--text); font-size: 13px;
-                  padding: 10px 12px; resize: vertical; min-height: 80px; width: 100%;
-                  font-family: inherit; line-height: 1.5; }
-.modal-textarea:focus { outline: none; border-color: var(--summary); }
-.modal-footer { padding: 0 18px 16px; display: flex; gap: 8px; }
-.btn-secondary { flex: 1; background: none; border: 1px solid var(--border);
-                 color: var(--muted); border-radius: 8px; padding: 10px;
-                 font-size: 13px; cursor: pointer; }
-.btn-secondary:hover { color: var(--text); border-color: var(--text); }
-.btn-run { flex: 2; background: var(--summary); color: #000; border: none;
-           border-radius: 8px; padding: 10px; font-size: 13px; font-weight: 700;
-           cursor: pointer; }
-.btn-run:hover { filter: brightness(1.1); }
-.btn-run:disabled { opacity: .5; cursor: default; filter: none; }
-.summary-stream { background: var(--bg); border: 1px solid var(--border);
-                  border-radius: 8px; padding: 12px; font-size: 13px; line-height: 1.65;
-                  max-height: 300px; overflow-y: auto; white-space: pre-wrap;
-                  display: none; color: var(--text); }
+/* ── Summary dock ── */
+#summary-dock { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+                display: none; background: rgba(13,17,23,.96);
+                border-top: 1px solid var(--border); padding: 10px 12px;
+                backdrop-filter: blur(8px); }
+.summary-dock-inner { max-width: 860px; margin: 0 auto; display: grid;
+                      grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+.summary-note { background: var(--surface); border: 1px solid var(--border);
+                border-radius: 8px; color: var(--text); font-size: 13px;
+                padding: 9px 10px; resize: none; min-height: 38px; max-height: 88px;
+                width: 100%; font-family: inherit; line-height: 1.4; }
+.summary-note:focus { outline: none; border-color: var(--summary); }
+.summary-run { background: var(--summary); color: #000; border: none;
+               border-radius: 8px; padding: 0 14px; height: 38px;
+               font-size: 13px; font-weight: 700; cursor: pointer;
+               white-space: nowrap; }
+.summary-run:hover { filter: brightness(1.08); }
+.summary-run:disabled { opacity: .55; cursor: default; filter: none; }
+.summary-output { grid-column: 1 / -1; background: var(--surface);
+                  border: 1px solid rgba(245,158,11,.35); border-radius: 8px;
+                  color: var(--text); display: none; font-size: 13px;
+                  line-height: 1.55; max-height: 140px; overflow-y: auto;
+                  padding: 10px; white-space: pre-wrap; }
+.summary-output.error { border-color: rgba(239,68,68,.5); color: #fecaca; }
 
 /* ── Empty state ── */
 .empty-state { text-align: center; color: var(--muted); padding: 60px 20px;
                display: none; flex-direction: column; align-items: center; gap: 10px; }
 .empty-state svg { opacity: .3; }
+
+@media (max-width: 640px) {
+  #feed { padding-bottom: 220px; }
+  .summary-dock-inner { grid-template-columns: 1fr; }
+  .summary-run { width: 100%; }
+}
 </style>
 </head>
 <body>
@@ -212,32 +195,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   </div>
 </div>
 
-<!-- Summarize FAB -->
-<div id="summarize-bar">
-  <button id="summarize-btn">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-    </svg>
-    Request Summary
-  </button>
-</div>
-
-<!-- Summary modal -->
-<div class="modal-backdrop" id="modal">
-  <div class="modal">
-    <div class="modal-header">
-      <div class="modal-title">AI Summary</div>
-      <button class="modal-close" id="modal-close">×</button>
-    </div>
-    <div class="modal-body">
-      <div class="modal-label">Note (optional — added as context for Claude)</div>
-      <textarea class="modal-textarea" id="modal-note" placeholder="e.g. heard a pursuit mentioned on scanner…"></textarea>
-      <div class="summary-stream" id="summary-stream"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn-secondary" id="modal-cancel">Cancel</button>
-      <button class="btn-run" id="modal-run">Run Summary</button>
-    </div>
+<!-- Summary dock -->
+<div id="summary-dock">
+  <div class="summary-dock-inner">
+    <textarea class="summary-note" id="summary-note" rows="1" placeholder="Optional note for summary"></textarea>
+    <button class="summary-run" id="summary-run">Summarize</button>
+    <div class="summary-output" id="summary-output"></div>
   </div>
 </div>
 
@@ -267,7 +230,7 @@ document.getElementById('login-btn').onclick = async () => {
   if (result.ok) {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
-    document.getElementById('summarize-bar').style.display = 'block';
+    document.getElementById('summary-dock').style.display = 'block';
     init(result.data);
   } else {
     document.getElementById('login-error').style.display = 'block';
@@ -285,6 +248,7 @@ if (AUTH) {
     if (r.ok) {
       document.getElementById('login-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
+      document.getElementById('summary-dock').style.display = 'block';
       init(await r.json());
     } else {
       AUTH = '';
@@ -297,6 +261,8 @@ if (AUTH) {
 let entries  = [];
 let filter   = 'all';
 let autoScroll = true;
+let lastStateSig = '';
+let pollingStarted = false;
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function timeToMins(t) {
@@ -412,6 +378,37 @@ function escHtml(t) {
   return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function entryKey(e) {
+  return [e.type, e.time, e.talkgroup || '', e.text || ''].join('|');
+}
+
+function entriesSignature(list) {
+  return list.map(entryKey).join('\n');
+}
+
+async function syncEntries() {
+  try {
+    const r = await fetch('/api/state', { headers: authHeader(), cache: 'no-store' });
+    if (!r.ok) return false;
+    const state = await r.json();
+    const sig = entriesSignature(state.entries);
+    if (sig !== lastStateSig) {
+      entries = state.entries;
+      lastStateSig = sig;
+      renderFeed();
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function startPolling() {
+  if (pollingStarted) return;
+  pollingStarted = true;
+  setInterval(syncEntries, 2000);
+}
+
 // ── Filters ───────────────────────────────────────────────────────────────────
 document.querySelectorAll('.filter-tab').forEach(btn => {
   btn.onclick = () => {
@@ -449,10 +446,7 @@ async function startStream() {
           const line = part.trim();
           if (!line.startsWith('data:')) continue;
           const payload = JSON.parse(line.slice(5).trim());
-          if (payload.type === 'tx') {
-            entries.push({ ...payload, id: `tx-${Date.now()}-${Math.random()}` });
-            renderFeed();
-          }
+          if (payload.type === 'tx' || payload.type === 'summary_start') syncEntries();
         }
       }
     } catch (e) { /* reconnect */ }
@@ -463,43 +457,31 @@ async function startStream() {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ── Summary modal ─────────────────────────────────────────────────────────────
-const modal       = document.getElementById('modal');
-const modalNote   = document.getElementById('modal-note');
-const streamBox   = document.getElementById('summary-stream');
-const runBtn      = document.getElementById('modal-run');
-const cancelBtn   = document.getElementById('modal-cancel');
-const closeBtn    = document.getElementById('modal-close');
+// ── Summary dock ──────────────────────────────────────────────────────────────
+const summaryNote = document.getElementById('summary-note');
+const summaryOut  = document.getElementById('summary-output');
+const summaryRun  = document.getElementById('summary-run');
 
-document.getElementById('summarize-btn').onclick = () => {
-  modalNote.value = '';
-  streamBox.style.display = 'none';
-  streamBox.textContent   = '';
-  runBtn.disabled = false;
-  runBtn.textContent = 'Run Summary';
-  cancelBtn.textContent = 'Cancel';
-  modal.classList.add('open');
-  setTimeout(() => modalNote.focus(), 50);
-};
+summaryNote.addEventListener('input', () => {
+  summaryNote.style.height = 'auto';
+  summaryNote.style.height = `${Math.min(summaryNote.scrollHeight, 88)}px`;
+});
 
-function closeModal() { modal.classList.remove('open'); }
-closeBtn.onclick  = closeModal;
-cancelBtn.onclick = closeModal;
-modal.onclick = e => { if (e.target === modal) closeModal(); };
-
-runBtn.onclick = async () => {
-  runBtn.disabled    = true;
-  runBtn.textContent = 'Running…';
-  streamBox.style.display = 'block';
-  streamBox.textContent   = '';
-  cancelBtn.textContent   = 'Close';
+summaryRun.onclick = async () => {
+  summaryRun.disabled = true;
+  summaryRun.textContent = 'Running';
+  summaryOut.classList.remove('error');
+  summaryOut.style.display = 'block';
+  summaryOut.textContent = '';
 
   try {
     const resp = await fetch('/api/summarize', {
       method: 'POST',
       headers: { ...authHeader(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ note: modalNote.value.trim() }),
+      body: JSON.stringify({ note: summaryNote.value.trim() }),
     });
+
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
     const reader = resp.body.getReader();
     const dec    = new TextDecoder();
@@ -516,30 +498,44 @@ runBtn.onclick = async () => {
         const line = part.trim();
         if (!line.startsWith('data:')) continue;
         const payload = JSON.parse(line.slice(5).trim());
+        if (payload.error) {
+          summaryOut.classList.add('error');
+          summaryOut.textContent = payload.error;
+          summaryRun.textContent = 'Summarize';
+          summaryRun.disabled = false;
+          return;
+        }
         if (payload.text) {
           full += payload.text;
-          streamBox.textContent = full;
-          streamBox.scrollTop   = streamBox.scrollHeight;
+          summaryOut.textContent = full;
+          summaryOut.scrollTop   = summaryOut.scrollHeight;
         }
         if (payload.done) {
-          // Reload entries to show the new summary card in feed
-          const r = await fetch('/api/entries', { headers: authHeader() });
-          if (r.ok) { entries = await r.json(); renderFeed(); }
-          runBtn.textContent = 'Done ✓';
+          await syncEntries();
+          summaryNote.value = '';
+          summaryNote.style.height = 'auto';
+          summaryRun.textContent = 'Done';
+          setTimeout(() => {
+            summaryRun.textContent = 'Summarize';
+            summaryRun.disabled = false;
+          }, 1200);
         }
       }
     }
   } catch (e) {
-    streamBox.textContent = 'Error: ' + e.message;
-    runBtn.textContent = 'Run Summary';
-    runBtn.disabled = false;
+    summaryOut.classList.add('error');
+    summaryOut.textContent = 'Error: ' + e.message;
+    summaryRun.textContent = 'Summarize';
+    summaryRun.disabled = false;
   }
 };
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 function init(data) {
   entries = data;
+  lastStateSig = entriesSignature(entries);
   renderFeed();
+  startPolling();
   startStream();
 }
 </script>
