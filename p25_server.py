@@ -207,8 +207,10 @@ def check_summary_rate_limit(auth: dict):
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
 TX_RE         = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\] \[(.+?)\] (.+)$')
-SUMMARY_START = re.compile(r'^=== SUMMARY === (.+)$')
-SUMMARY_END   = '=' * 40
+SUMMARY_START      = re.compile(r'^=== SUMMARY === (.+)$')
+FULL_SUMMARY_MARKER = "=== FULL SUMMARY ==="
+FULL_SUMMARY_START  = re.compile(r'^=== FULL SUMMARY === (.+)$')
+SUMMARY_END         = '=' * 40
 INCIDENT_HEADING_RE = re.compile(r'^#{2,3}\s+\**(?:INCIDENT\s+\d+\s*:\s*)?(.+?)\**\s*$',
                                  re.IGNORECASE)
 FIELD_RE = re.compile(r'^(?:-\s+)?\**([^:*]+)\**\s*:\s*(.*)$')
@@ -234,13 +236,15 @@ def parse_log() -> list[dict]:
                             "time":m.group(1),"talkgroup":tg,
                             "agency":_agency(tg),"text":m.group(3)})
             i += 1; continue
-        ms = SUMMARY_START.match(line)
+        ms = SUMMARY_START.match(line) or FULL_SUMMARY_START.match(line)
         if ms:
+            is_full = bool(FULL_SUMMARY_START.match(line))
             body, i = [], i + 1
             while i < len(lines) and not lines[i].startswith(SUMMARY_END):
                 body.append(lines[i]); i += 1
             entries.append({"type":"summary","id":f"sum-{len(entries)}",
-                            "time":ms.group(1),"text":"\n".join(body).strip()})
+                            "time":ms.group(1),"text":"\n".join(body).strip(),
+                            "full": is_full})
             i += 1; continue
         i += 1
     return entries
@@ -358,21 +362,73 @@ def _extract_incidents_from_summary(entry: dict) -> list[dict]:
 
 def derive_incidents(entries: list[dict]) -> list[dict]:
     merged: dict[str, dict] = {}
-    summaries = [e for e in entries if e.get("type") == "summary"]
-    for entry in reversed(summaries):
-        for incident in _extract_incidents_from_summary(entry):
-            existing = merged.get(incident["id"])
-            if not existing:
-                incident["updates"] = 1
-                incident["first_seen"] = incident["summary_time"]
-                incident["last_seen"] = incident["summary_time"]
+
+    def _merge(incident: dict, newer_wins: bool):
+        existing = merged.get(incident["id"])
+        if not existing:
+            incident["updates"] = 1
+            incident["first_seen"] = incident["summary_time"]
+            incident["last_seen"]  = incident["summary_time"]
+            merged[incident["id"]] = incident
+        else:
+            if newer_wins and incident["summary_time"] > existing["last_seen"]:
+                # This occurrence is more recent — promote it to authoritative
+                incident["updates"]    = existing["updates"] + 1
+                incident["first_seen"] = min(existing["first_seen"], incident["summary_time"])
+                incident["last_seen"]  = incident["summary_time"]
+                incident.setdefault("recent_tx", existing.get("recent_tx", 0))
                 merged[incident["id"]] = incident
             else:
                 existing["updates"] += 1
-                existing["first_seen"] = incident["summary_time"]
+                if incident["summary_time"] < existing["first_seen"]:
+                    existing["first_seen"] = incident["summary_time"]
+
+    # Layer 1: full summaries oldest→newest (base context, lower authority)
+    full_sums = sorted(
+        [e for e in entries if e.get("type") == "summary" and e.get("full")],
+        key=lambda e: e["time"],
+    )
+    for entry in full_sums:
+        for inc in _extract_incidents_from_summary(entry):
+            _merge(inc, newer_wins=True)
+
+    # Layer 2: incremental summaries oldest→newest (override full summary data)
+    incr_sums = sorted(
+        [e for e in entries if e.get("type") == "summary" and not e.get("full")],
+        key=lambda e: e["time"],
+    )
+    for entry in incr_sums:
+        for inc in _extract_incidents_from_summary(entry):
+            _merge(inc, newer_wins=True)
+
+    # Layer 3: raw tx entries since last summary — tag incidents with recent activity
+    all_sum_times = [e["time"] for e in entries if e.get("type") == "summary"]
+    last_sum_time = max(all_sum_times) if all_sum_times else ""
+    recent_tx = [e for e in entries if e.get("type") == "tx" and e.get("time", "") > last_sum_time]
+    if recent_tx:
+        def _cats(agency_str: str) -> set:
+            a = agency_str.upper()
+            cats = set()
+            if any(x in a for x in ("LPD", "WLPD", "TCSD", "PUPD", "POLICE", "SHERIFF")): cats.add("police")
+            if any(x in a for x in ("LFD", "WLFD", "TCFD", "PUFD", "FIRE")): cats.add("fire")
+            if any(x in a for x in ("EMS", "TEAS")): cats.add("ems")
+            return cats
+
+        for inc in merged.values():
+            inc_cats = _cats(inc.get("agency", ""))
+            if not inc_cats:
+                continue
+            matching = [t for t in recent_tx if _cats(t.get("agency", "")) & inc_cats]
+            if matching:
+                inc["recent_tx"]      = len(matching)
+                inc["last_tx_time"]   = max(t["time"] for t in matching)
+
     priority = {"active": 0, "watch": 1, "routine": 2, "clear": 3}
     ordered = sorted(merged.values(), key=lambda i: i.get("last_seen", ""), reverse=True)
     return sorted(ordered, key=lambda i: priority.get(i.get("status_kind", "watch"), 1))
+
+def _is_summary_marker(l: str) -> bool:
+    return SUMMARY_MARKER in l or FULL_SUMMARY_MARKER in l
 
 def read_since_last_summary() -> list[str]:
     if not LOG_FILE.exists():
@@ -380,7 +436,7 @@ def read_since_last_summary() -> list[str]:
     lines = LOG_FILE.read_text(errors="replace").splitlines()
     last = -1
     for i, l in enumerate(lines):
-        if SUMMARY_MARKER in l:
+        if _is_summary_marker(l):
             last = i
     return [l for l in lines[last+1:] if l.strip()]
 
@@ -391,7 +447,7 @@ def read_full_log() -> list[str]:
     result = []
     in_summary = False
     for l in LOG_FILE.read_text(errors="replace").splitlines():
-        if SUMMARY_MARKER in l:
+        if _is_summary_marker(l):
             in_summary = True
             continue
         if in_summary and set(l.strip()) <= {'='}:
@@ -616,9 +672,10 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
             yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
             return
 
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        marker = FULL_SUMMARY_MARKER if req.full else SUMMARY_MARKER
         with open(LOG_FILE, "a") as f:
-            f.write(f"\n{SUMMARY_MARKER} {ts}\n{full.strip()}\n{'='*40}\n\n")
+            f.write(f"\n{marker} {ts}\n{full.strip()}\n{'='*40}\n\n")
         yield f"data: {json.dumps({'done':True,'time':ts,'text':full.strip()})}\n\n"
 
     return StreamingResponse(stream_summary(), media_type="text/event-stream",
