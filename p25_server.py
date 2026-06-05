@@ -226,6 +226,7 @@ def get_state():
     entries = parse_log()
     return JSONResponse({
         "entries": entries,
+        "entries_latest": list(reversed(entries)),
         "incidents": derive_incidents(entries),
         "log_size": stat.st_size if stat else 0,
         "log_mtime": stat.st_mtime if stat else 0,

@@ -309,6 +309,7 @@ if (AUTH) {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let entries  = [];
+let entriesLatest = [];
 let incidents = [];
 let filter   = 'all';
 let currentView = 'feed';
@@ -329,8 +330,8 @@ function renderFeed() {
   const feed = document.getElementById('feed');
   const empty = document.getElementById('empty-state');
   const visible = filter === 'all'
-    ? entries
-    : entries.filter(e => e.type === 'summary' || e.agency === filter);
+    ? entriesLatest
+    : entriesLatest.filter(e => e.type === 'summary' || e.agency === filter);
 
   if (!visible.length) {
     empty.style.display = 'flex';
@@ -341,9 +342,10 @@ function renderFeed() {
   empty.style.display = 'none';
 
   feed.innerHTML = '';
+  feed.dataset.newestId = visible[0]?.id || '';
   const list = document.createElement('div');
   list.className = 'feed-list';
-  for (const entry of [...visible].reverse()) {
+  for (const entry of visible) {
     list.appendChild(entry.type === 'summary' ? makeSummaryCard(entry) : makeTxCard(entry));
   }
   feed.appendChild(list);
@@ -439,7 +441,10 @@ async function syncEntries() {
   const dot = document.getElementById('live-dot');
   const status = document.getElementById('update-status');
   try {
-    const r = await fetch('/api/state', { headers: authHeader(), cache: 'no-store' });
+    const r = await fetch(`/api/state?ts=${Date.now()}`, {
+      headers: authHeader(),
+      cache: 'no-store',
+    });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const state = await r.json();
     const latest = (state.entries || []).at(-1);
@@ -450,15 +455,14 @@ async function syncEntries() {
       log_size: state.log_size,
       log_mtime: state.log_mtime,
     });
-    if (sig !== lastStateSig) {
-      entries = state.entries || [];
-      incidents = state.incidents || [];
-      lastStateSig = sig;
-      renderFeed();
-      renderIncidents();
-    }
+    entries = state.entries || [];
+    entriesLatest = state.entries_latest || [...entries].reverse();
+    incidents = state.incidents || [];
+    lastStateSig = sig;
+    renderFeed();
+    renderIncidents();
     dot.classList.remove('dead');
-    const newest = entries[entries.length - 1];
+    const newest = entriesLatest[0];
     const newestLabel = newest ? `${newest.time} ${newest.text || newest.type}` : 'empty';
     status.textContent = `${entries.length} · ${newestLabel}`;
     return true;
@@ -580,6 +584,7 @@ summaryRun.onclick = async () => {
 // ── Init ──────────────────────────────────────────────────────────────────────
 function init(data) {
   entries = Array.isArray(data) ? data : (data.entries || []);
+  entriesLatest = Array.isArray(data) ? [...entries].reverse() : (data.entries_latest || [...entries].reverse());
   incidents = Array.isArray(data) ? [] : (data.incidents || []);
   const latest = entries.at(-1);
   lastStateSig = JSON.stringify({
