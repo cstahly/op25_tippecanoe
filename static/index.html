@@ -76,6 +76,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
             align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
 .icon-btn:hover { border-color: var(--text); }
 .icon-btn svg { width: 17px; height: 17px; }
+.icon-group { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
 
 .filter-tabs { display: flex; gap: 4px; }
 .filter-tab { background: none; border: 1px solid var(--border); border-radius: 20px;
@@ -239,7 +240,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   header { align-items: stretch; flex-wrap: wrap; height: auto; padding: 8px 10px; }
   .header-title { min-width: 180px; }
   .update-status { margin-left: auto; }
-  .header-controls { order: 3; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .header-controls { order: 3; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
   .view-tabs { min-width: 132px; }
   .view-tab { flex: 1; }
   .filter-tabs { overflow-x: auto; }
@@ -280,24 +281,26 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <button class="view-tab active" data-view="feed">Log</button>
         <button class="view-tab" data-view="incidents">Incidents</button>
       </div>
-      <button class="icon-btn" id="audio-btn" title="Listen live">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-          <path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/>
-        </svg>
-      </button>
-      <button class="icon-btn" id="download-btn" title="Download raw log">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-          <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-        </svg>
-      </button>
-      <button class="icon-btn" id="share-btn" title="Share login QR" style="display:none">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-        </svg>
-      </button>
+      <div class="icon-group">
+        <button class="icon-btn" id="audio-btn" title="Listen live">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="download-btn" title="Download raw log">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="share-btn" title="Share login QR" style="display:none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+          </svg>
+        </button>
+      </div>
     </div>
   </header>
 
@@ -351,7 +354,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v14';
+const APP_VERSION = 'v15';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
