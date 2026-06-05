@@ -410,10 +410,28 @@ async def live_stream(request: Request):
 
 PROMPT_TEMPLATE = """\
 You are an experienced public safety dispatcher reviewing radio traffic logs from \
-Tippecanoe County, Indiana (Lafayette area).
+Tippecanoe County, Indiana. You know this area well.
 
-Talkgroups: TEAS EMS (1833/2225), TCFD/LFD/WLFD/PUFD (fire), TCSD (1813, sheriff), \
-LPD (1931), WLPD (2019), PUPD (2119).
+Geography: Lafayette and West Lafayette straddle the Wabash River. \
+Major roads — I-65 (N/S), US 52/Sagamore Pkwy (bypass), SR 25, SR 38, SR 43, \
+Creasy Lane, Veterans Memorial Pkwy, McCarty Lane, Teal Rd, Schuyler Ave, \
+South St, Main St (downtown Lafayette). \
+Key landmarks — IU Health Arnett Hospital (2600 Greenbush St, Lafayette), \
+St. Elizabeth East (1501 Hartford St, Lafayette), Franciscan Lafayette (1501 Hartford St area), \
+Purdue University (West Lafayette campus), Tippecanoe County Courthouse (downtown Lafayette), \
+Columbian Park / zoo (south Lafayette), Happy Hollow Park, River Road corridor. \
+Notable areas — Eastside (east of I-65), South End (Creasy/McCarty area), \
+West Lafayette (Purdue/campus), downtown Lafayette (Main/5th St grid), \
+Battle Ground (north county), Shadeland area (northwest Lafayette), \
+State St corridor (student housing near Purdue), Murdock Park area. \
+Major employers/facilities — Subaru of Indiana Automotive (SIA, northwest Lafayette), \
+Purdue University, TCOM, Alcoa Warrick (south county). \
+Zip codes: 47901/47904 (Lafayette core), 47905 (south Lafayette), 47906 (West Lafayette/Purdue), \
+47907 (West Lafayette east).
+
+Talkgroups: TEAS EMS (1833/2225), TCFD/LFD/WLFD/PUFD (fire depts), \
+TCSD (1813, Tippecanoe County Sheriff), LPD (1931, Lafayette Police), \
+WLPD (2019, West Lafayette Police), PUPD (2119, Purdue University Police).
 
 10-codes: 10-4=ack, 10-7=OOS, 10-8=in service, 10-20=location, 10-22=disregard, \
 10-23=arrived, 10-27=DL check, 10-28=registration, 10-29=warrants, 10-33=emergency, \
@@ -424,6 +442,9 @@ Radio traffic since last summary (format [HH:MM:SS] [TALKGROUP] transcript):
 {block}
 
 Summarize what has been happening. Group by incident. Translate codes. \
+When you recognize a local address, business, or landmark in the Lafayette area, \
+include that context. If you are unsure about a specific local address or entity, \
+use web_search to look it up. \
 Use one markdown section per incident with this shape:
 ### INCIDENT N: Short incident title
 - Agency: agency or agencies
@@ -508,8 +529,9 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         full   = ""
         try:
             async with client.messages.stream(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=512,
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                tools=[{"type": "web_search_20260209", "name": "web_search"}],
                 messages=[{"role":"user","content":prompt}],
             ) as s:
                 async for chunk in s.text_stream:
