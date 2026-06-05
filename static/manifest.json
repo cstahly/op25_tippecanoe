@@ -1,0 +1,13 @@
+{
+  "name": "P25 Monitor",
+  "short_name": "P25",
+  "description": "Tippecanoe County P25 radio monitor",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

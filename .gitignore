@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+
+# Live radio output and decoder noise.
+p25_log.txt
+stderr.log
+
+# Local credentials.
+.env
+*.env
+.p25_password
+

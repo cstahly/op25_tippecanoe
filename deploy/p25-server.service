@@ -1,0 +1,17 @@
+[Unit]
+Description=P25 Web App
+After=network.target
+
+[Service]
+Type=simple
+User=cstahly
+Group=cstahly
+WorkingDirectory=/home/cstahly/op25_tippecanoe
+EnvironmentFile=/etc/p25-server.env
+ExecStart=/usr/bin/python3 -m uvicorn p25_server:app --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,72 @@
+{
+    "channels": [
+        {
+            "name": "Voice",
+            "device": "hackrf0",
+            "trunking_sysname": "Tippecanoe County",
+            "demod_type": "cqpsk",
+            "destination": "udp://127.0.0.1:23456",
+            "meta_stream_name": "",
+            "excess_bw": 0.2,
+            "filter_type": "rc",
+            "if_rate": 24000,
+            "plot": "",
+            "symbol_rate": 4800,
+            "enable_analog": "off",
+            "whitelist": "",
+            "blacklist": "",
+            "crypt_keys": ""
+        }
+    ],
+    "devices": [
+        {
+            "args": "hackrf=0",
+            "gains": "RF:14,IF:16,BB:20",
+            "name": "hackrf0",
+            "offset": 25000,
+            "ppm": 0.0,
+            "rate": 2000000,
+            "usable_bw_pct": 0.85,
+            "tunable": true
+        }
+    ],
+    "trunking": {
+        "module": "tk_p25.py",
+        "chans": [
+            {
+                "nac": "0x0",
+                "wacn": "0xBEE00",
+                "sysid": "0x6FD",
+                "sysname": "Tippecanoe County",
+                "control_channel_list": "851.05000,853.83750,857.73750",
+                "whitelist": "",
+                "blacklist": "",
+                "tgid_tags_file": "trunk-tags.tsv",
+                "rid_tags_file": "",
+                "tdma_cc": false,
+                "crypt_behavior": 2
+            }
+        ]
+    },
+    "audio": {
+        "module": "stt_audio.py",
+        "instances": [
+            {
+                "instance_name": "audio0",
+                "device_name": "default",
+                "udp_port": 23456,
+                "audio_gain": 1.0,
+                "number_channels": 1
+            }
+        ]
+    },
+    "terminal": {
+        "module": "terminal.py",
+        "terminal_type": "curses",
+        "curses_plot_interval": 0.1,
+        "http_plot_interval": 1.0,
+        "http_plot_directory": "",
+        "tuning_step_large": 1200,
+        "tuning_step_small": 100
+    }
+}
