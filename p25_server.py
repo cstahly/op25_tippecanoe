@@ -384,6 +384,23 @@ def read_since_last_summary() -> list[str]:
             last = i
     return [l for l in lines[last+1:] if l.strip()]
 
+def read_full_log() -> list[str]:
+    """All transcript lines, stripping existing summary blocks."""
+    if not LOG_FILE.exists():
+        return []
+    result = []
+    in_summary = False
+    for l in LOG_FILE.read_text(errors="replace").splitlines():
+        if SUMMARY_MARKER in l:
+            in_summary = True
+            continue
+        if in_summary and set(l.strip()) <= {'='}:
+            in_summary = False
+            continue
+        if not in_summary and l.strip():
+            result.append(l)
+    return result
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/entries", dependencies=[Depends(require_auth)])
@@ -502,6 +519,7 @@ Note any unresolved situations. Be direct and concise."""
 
 class SummarizeReq(BaseModel):
     note: str = ""
+    full: bool = False
 
 class ShareLoginReq(BaseModel):
     ttl_seconds: int = DEFAULT_SHARE_TOKEN_SECONDS
@@ -536,22 +554,26 @@ def share_login(req: ShareLoginReq, request: Request, auth: dict = Depends(requi
 
 @app.post("/api/summarize")
 async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
-    try:
-        check_summary_rate_limit(auth)
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+    if req.full:
+        if auth["username"] != USERNAME:
+            raise HTTPException(403, detail="Only the primary user can run a full summary")
+        lines = read_full_log()
+    else:
+        try:
+            check_summary_rate_limit(auth)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
 
-        async def stream_limited():
-            yield f"data: {json.dumps({'error':detail.get('error', 'Rate limited'),'done':True,'retry_after_seconds':detail.get('retry_after_seconds', 0)})}\n\n"
+            async def stream_limited():
+                yield f"data: {json.dumps({'error':detail.get('error', 'Rate limited'),'done':True,'retry_after_seconds':detail.get('retry_after_seconds', 0)})}\n\n"
 
-        return StreamingResponse(
-            stream_limited(),
-            status_code=exc.status_code,
-            media_type="text/event-stream",
-            headers={**(exc.headers or {}), "Cache-Control":"no-cache","X-Accel-Buffering":"no"},
-        )
-
-    lines = read_since_last_summary()
+            return StreamingResponse(
+                stream_limited(),
+                status_code=exc.status_code,
+                media_type="text/event-stream",
+                headers={**(exc.headers or {}), "Cache-Control":"no-cache","X-Accel-Buffering":"no"},
+            )
+        lines = read_since_last_summary()
 
     async def stream_empty():
         yield f"data: {json.dumps({'done':True,'text':'No new traffic since last summary.'})}\n\n"
@@ -562,6 +584,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
     block        = "\n".join(lines)
     note_section = f"\nOperator note: {req.note}\n" if req.note else ""
     prompt       = PROMPT_TEMPLATE.format(note_section=note_section, block=block)
+    max_tokens   = 4096 if req.full else 1024
 
     async def stream_summary() -> AsyncGenerator[str, None]:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -574,7 +597,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         try:
             async with client.messages.stream(
                 model="claude-sonnet-4-6",
-                max_tokens=1024,
+                max_tokens=max_tokens,
                 tools=[{"type": "web_search_20260209", "name": "web_search"}],
                 messages=[{"role":"user","content":prompt}],
             ) as s:

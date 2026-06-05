@@ -190,6 +190,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                 padding: 9px 10px; resize: none; min-height: 38px; max-height: 88px;
                 width: 100%; font-family: inherit; line-height: 1.4; }
 .summary-note:focus { outline: none; border-color: var(--summary); }
+.summary-btn-group { display: flex; gap: 6px; align-items: end; }
 .summary-run { background: var(--summary); color: #000; border: none;
                border-radius: 8px; padding: 0 14px; height: 38px;
                font-size: 13px; font-weight: 700; cursor: pointer;
@@ -348,13 +349,16 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 <div id="summary-dock">
   <div class="summary-dock-inner">
     <textarea class="summary-note" id="summary-note" rows="1" placeholder="Optional note for summary"></textarea>
-    <button class="summary-run" id="summary-run">Summarize</button>
+    <div class="summary-btn-group">
+      <button class="summary-run" id="summary-all" style="display:none;opacity:.7" title="Summarize entire log">All</button>
+      <button class="summary-run" id="summary-run">Summarize</button>
+    </div>
     <div class="summary-output" id="summary-output"></div>
   </div>
 </div>
 
 <script>
-const APP_VERSION = 'v15';
+const APP_VERSION = 'v16';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -856,6 +860,72 @@ summaryRun.onclick = async () => {
   }
 };
 
+document.getElementById('summary-all').onclick = async () => {
+  const allBtn = document.getElementById('summary-all');
+  allBtn.disabled = true;
+  summaryRun.disabled = true;
+  summaryRun.classList.add('running');
+  summaryRun.textContent = 'Running';
+  summaryOut.classList.remove('error');
+  summaryOut.style.display = 'none';
+  summaryOut.textContent = '';
+
+  try {
+    const resp = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { ...authHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: summaryNote.value.trim(), full: true }),
+    });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = JSON.parse(line.slice(5).trim());
+        if (payload.error) {
+          summaryRun.classList.remove('running');
+          summaryOut.classList.add('error');
+          summaryOut.style.display = 'block';
+          summaryOut.textContent = payload.error;
+          summaryRun.textContent = 'Summarize';
+          summaryRun.disabled = false;
+          allBtn.disabled = false;
+          return;
+        }
+        if (payload.text) {
+          summaryOut.style.display = 'block';
+          summaryOut.textContent += payload.text;
+        }
+        if (payload.done) {
+          await syncEntries();
+          summaryNote.value = '';
+          summaryNote.style.height = 'auto';
+          summaryRun.classList.remove('running');
+          summaryRun.textContent = 'Done';
+          setTimeout(() => { summaryRun.textContent = 'Summarize'; summaryRun.disabled = false; }, 1200);
+          allBtn.disabled = false;
+        }
+      }
+    }
+  } catch (e) {
+    summaryRun.classList.remove('running');
+    summaryOut.classList.add('error');
+    summaryOut.style.display = 'block';
+    summaryOut.textContent = 'Error: ' + e.message;
+    summaryRun.textContent = 'Summarize';
+    summaryRun.disabled = false;
+    allBtn.disabled = false;
+  }
+};
+
 // ── Download logs ─────────────────────────────────────────────────────────────
 document.getElementById('download-btn').onclick = async () => {
   const btn = document.getElementById('download-btn');
@@ -922,13 +992,16 @@ let shareUsers = [];
 async function checkShareAccess() {
   const r = await fetch('/api/users', { headers: authHeader(), cache: 'no-store' });
   const btn = document.getElementById('share-btn');
+  const allBtn = document.getElementById('summary-all');
   if (r.ok) {
     shareUsers = await r.json();
     const sel = document.getElementById('share-for');
     sel.innerHTML = shareUsers.map(u => `<option value="${u.username}">${u.username}</option>`).join('');
     btn.style.display = '';
+    allBtn.style.display = '';
   } else {
     btn.style.display = 'none';
+    allBtn.style.display = 'none';
   }
 }
 
