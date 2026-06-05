@@ -255,6 +255,8 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
+const APP_VERSION = 'v7';
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH = sessionStorage.getItem('p25_auth') || '';
 
@@ -329,9 +331,7 @@ function agencyLabel(agency) {
 function renderFeed() {
   const feed = document.getElementById('feed');
   const empty = document.getElementById('empty-state');
-  const visible = filter === 'all'
-    ? entriesLatest
-    : entriesLatest.filter(e => e.type === 'summary' || e.agency === filter);
+  const visible = entriesLatest;
 
   if (!visible.length) {
     empty.style.display = 'flex';
@@ -341,15 +341,10 @@ function renderFeed() {
   }
   empty.style.display = 'none';
 
-  feed.innerHTML = '';
   feed.dataset.newestId = visible[0]?.id || '';
-  const list = document.createElement('div');
-  list.className = 'feed-list';
-  for (const entry of visible) {
-    list.appendChild(entry.type === 'summary' ? makeSummaryCard(entry) : makeTxCard(entry));
-  }
-  feed.appendChild(list);
-
+  feed.innerHTML = `<div class="feed-list" data-rendered-at="${Date.now()}">
+    ${visible.map(entryHtml).join('')}
+  </div>`;
   feed.scrollTop = 0;
 }
 
@@ -420,6 +415,32 @@ function makeTxCard(entry) {
   return card;
 }
 
+function entryHtml(entry) {
+  if (entry.type === 'summary') {
+    return `
+      <div class="summary-card" data-id="${escHtml(entry.id)}">
+        <div class="summary-header">
+          <span class="summary-label">AI SUMMARY</span>
+          <span class="summary-time">${escHtml(entry.time)}</span>
+        </div>
+        <div class="summary-text">${escHtml(entry.text || '')}</div>
+      </div>`;
+  }
+  const text = entry.text || '';
+  const long = text.length > 120;
+  return `
+    <div class="tx-card${long ? ' has-more' : ''}" data-agency="${escHtml(entry.agency || 'other')}" data-id="${escHtml(entry.id || '')}">
+      <div class="tx-card-inner">
+        <div class="tx-meta">
+          <span class="tg-badge" data-agency="${escHtml(entry.agency || 'other')}">${escHtml(entry.talkgroup || 'Unknown')}</span>
+          <span class="tx-time">${escHtml(entry.time || '')}</span>
+        </div>
+        <div class="tx-text${long ? ' truncated' : ''}">${escHtml(text)}</div>
+        ${long ? '<div class="tx-expand">tap to expand</div>' : ''}
+      </div>
+    </div>`;
+}
+
 function makeSummaryCard(entry) {
   const card = document.createElement('div');
   card.className = 'summary-card';
@@ -464,7 +485,7 @@ async function syncEntries() {
     dot.classList.remove('dead');
     const newest = entriesLatest[0];
     const newestLabel = newest ? `${newest.time} ${newest.text || newest.type}` : 'empty';
-    status.textContent = `${entries.length} · ${newestLabel}`;
+    status.textContent = `${APP_VERSION} · ${entries.length} · ${newestLabel}`;
     return true;
   } catch (e) {
     dot.classList.add('dead');
@@ -483,10 +504,19 @@ function startPolling() {
 document.querySelectorAll('.filter-tab').forEach(btn => {
   btn.onclick = () => {
     document.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    filter = btn.dataset.filter;
+    document.querySelector('.filter-tab[data-filter="all"]').classList.add('active');
+    filter = 'all';
     renderFeed();
   };
+});
+
+document.getElementById('feed').addEventListener('click', e => {
+  const card = e.target.closest('.tx-card.has-more');
+  if (!card) return;
+  card.classList.toggle('expanded');
+  card.querySelector('.tx-text')?.classList.toggle('truncated');
+  const exp = card.querySelector('.tx-expand');
+  if (exp) exp.textContent = card.classList.contains('expanded') ? 'tap to collapse' : 'tap to expand';
 });
 
 document.querySelectorAll('.view-tab').forEach(btn => {
