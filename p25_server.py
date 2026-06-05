@@ -488,7 +488,7 @@ Radio traffic since last summary (format [HH:MM:SS] [TALKGROUP] transcript):
 Summarize what has been happening. Group by incident. Translate codes. \
 When you recognize a local address, business, or landmark in the Lafayette area, \
 include that context. If you are unsure about a specific local address or entity, \
-use web_search to look it up. \
+use web_search to look it up silently — do not narrate that you are searching. \
 Use one markdown section per incident with this shape:
 ### INCIDENT N: Short incident title
 - Agency: agency or agencies
