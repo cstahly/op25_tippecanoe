@@ -122,7 +122,17 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .summary-time { font-size: 11px; color: var(--muted); font-family: monospace;
                 margin-left: auto; }
 .summary-text { padding: 8px 14px 12px; font-size: 13px; line-height: 1.65;
-                color: var(--text); white-space: pre-wrap; }
+                color: var(--text); }
+.summary-md { display: grid; gap: 7px; }
+.summary-md h2, .summary-md h3 { color: var(--text); font-size: 14px; line-height: 1.3;
+                                 margin: 8px 0 2px; }
+.summary-md h2:first-child, .summary-md h3:first-child { margin-top: 0; }
+.summary-md p { margin: 0; }
+.summary-md ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.summary-md li { padding-left: 2px; }
+.summary-md strong { color: #fff; font-weight: 800; }
+.summary-md hr { border: 0; border-top: 1px solid rgba(245,158,11,.28); margin: 4px 0; }
+.summary-md .summary-alert { color: #fcd34d; font-weight: 700; }
 
 /* ── Incident board ── */
 .incident-board { max-width: 980px; margin: 0 auto; display: grid;
@@ -175,6 +185,11 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                white-space: nowrap; }
 .summary-run:hover { filter: brightness(1.08); }
 .summary-run:disabled { opacity: .55; cursor: default; filter: none; }
+.summary-run.running::before { content: ""; display: inline-block; width: 12px; height: 12px;
+                               margin-right: 7px; border-radius: 50%;
+                               border: 2px solid rgba(0,0,0,.28); border-top-color: #000;
+                               vertical-align: -2px; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .summary-output { grid-column: 1 / -1; background: var(--surface);
                   border: 1px solid rgba(245,158,11,.35); border-radius: 8px;
                   color: var(--text); display: none; font-size: 13px;
@@ -259,7 +274,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v9';
+const APP_VERSION = 'v10';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH = sessionStorage.getItem('p25_auth') || '';
@@ -334,6 +349,9 @@ function agencyLabel(agency) {
 
 function renderFeed() {
   const feed = document.getElementById('feed');
+  const wasNearTop = feed.scrollTop < 24;
+  const previousHeight = feed.scrollHeight;
+  const previousTop = feed.scrollTop;
   const visible = entriesLatest.filter(entry =>
     filter === 'all' || entry.type === 'summary' || entry.agency === filter
   );
@@ -360,7 +378,11 @@ function renderFeed() {
     list.appendChild(entry.type === 'summary' ? makeSummaryCard(entry) : makeTxCard(entry));
   }
   feed.appendChild(list);
-  feed.scrollTop = 0;
+  if (wasNearTop) {
+    feed.scrollTop = 0;
+  } else {
+    feed.scrollTop = previousTop + (feed.scrollHeight - previousHeight);
+  }
 }
 
 function renderIncidents() {
@@ -440,12 +462,58 @@ function makeSummaryCard(entry) {
       <span class="summary-label">AI SUMMARY</span>
       <span class="summary-time">${escHtml(entry.time || '')}</span>
     </div>
-    <div class="summary-text">${escHtml(entry.text || '')}</div>`;
+    <div class="summary-text summary-md">${renderSummaryMarkdown(entry.text || '')}</div>`;
   return card;
 }
 
 function escHtml(t) {
   return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderInlineMarkdown(text) {
+  return escHtml(text)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function renderSummaryMarkdown(text) {
+  const html = [];
+  let list = [];
+  const flushList = () => {
+    if (!list.length) return;
+    html.push(`<ul>${list.map(item => `<li>${item}</li>`).join('')}</ul>`);
+    list = [];
+  };
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushList();
+      continue;
+    }
+    if (/^-{3,}$/.test(line)) {
+      flushList();
+      html.push('<hr>');
+      continue;
+    }
+    const h = line.match(/^(#{1,3})\s+(.+)$/);
+    if (h) {
+      flushList();
+      const level = h[1].length >= 3 ? 'h3' : 'h2';
+      html.push(`<${level}>${renderInlineMarkdown(h[2])}</${level}>`);
+      continue;
+    }
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      list.push(renderInlineMarkdown(bullet[1]));
+      continue;
+    }
+    flushList();
+    const cls = /^(⚠|WARNING|UNRESOLVED|ACTION)/i.test(line) ? ' class="summary-alert"' : '';
+    html.push(`<p${cls}>${renderInlineMarkdown(line)}</p>`);
+  }
+  flushList();
+  return html.join('');
 }
 
 async function syncEntries() {
@@ -539,9 +607,10 @@ summaryNote.addEventListener('input', () => {
 
 summaryRun.onclick = async () => {
   summaryRun.disabled = true;
+  summaryRun.classList.add('running');
   summaryRun.textContent = 'Running';
   summaryOut.classList.remove('error');
-  summaryOut.style.display = 'block';
+  summaryOut.style.display = 'none';
   summaryOut.textContent = '';
 
   try {
@@ -556,7 +625,6 @@ summaryRun.onclick = async () => {
     const reader = resp.body.getReader();
     const dec    = new TextDecoder();
     let   buf    = '';
-    let   full   = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -569,21 +637,19 @@ summaryRun.onclick = async () => {
         if (!line.startsWith('data:')) continue;
         const payload = JSON.parse(line.slice(5).trim());
         if (payload.error) {
+          summaryRun.classList.remove('running');
           summaryOut.classList.add('error');
+          summaryOut.style.display = 'block';
           summaryOut.textContent = payload.error;
           summaryRun.textContent = 'Summarize';
           summaryRun.disabled = false;
           return;
         }
-        if (payload.text) {
-          full += payload.text;
-          summaryOut.textContent = full;
-          summaryOut.scrollTop   = summaryOut.scrollHeight;
-        }
         if (payload.done) {
           await syncEntries();
           summaryNote.value = '';
           summaryNote.style.height = 'auto';
+          summaryRun.classList.remove('running');
           summaryRun.textContent = 'Done';
           setTimeout(() => {
             summaryRun.textContent = 'Summarize';
@@ -593,7 +659,9 @@ summaryRun.onclick = async () => {
       }
     }
   } catch (e) {
+    summaryRun.classList.remove('running');
     summaryOut.classList.add('error');
+    summaryOut.style.display = 'block';
     summaryOut.textContent = 'Error: ' + e.message;
     summaryRun.textContent = 'Summarize';
     summaryRun.disabled = false;
