@@ -433,15 +433,28 @@ class SummarizeReq(BaseModel):
 
 class ShareLoginReq(BaseModel):
     ttl_seconds: int = DEFAULT_SHARE_TOKEN_SECONDS
+    for_username: str = ""
+
+@app.get("/api/users")
+def list_users(auth: dict = Depends(require_auth)):
+    if auth["username"] != USERNAME:
+        raise HTTPException(403, detail="Only the primary user can list users")
+    return JSONResponse([{"username": u} for u in _load_users().keys()])
 
 @app.post("/api/login/share")
 def share_login(req: ShareLoginReq, request: Request, auth: dict = Depends(require_auth)):
+    if auth["username"] != USERNAME:
+        raise HTTPException(403, detail="Only the primary user can generate QR codes")
+    target = req.for_username.strip() or auth["username"]
+    users = _load_users()
+    if target not in users:
+        raise HTTPException(400, detail=f"Unknown user: {target}")
     ttl = max(300, min(int(req.ttl_seconds or DEFAULT_SHARE_TOKEN_SECONDS), 7 * 24 * 60 * 60))
-    token, exp = _make_login_token(auth["username"], ttl)
+    token, exp = _make_login_token(target, ttl)
     share_path = f"/?token={token}"
     share_url = f"{_public_base_url(request)}{share_path}"
     return JSONResponse({
-        "username": auth["username"],
+        "username": target,
         "token": token,
         "url": share_url,
         "qr_data_url": _qr_data_url(share_url),

@@ -71,6 +71,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
             cursor: pointer; font-size: 12px; font-weight: 700; padding: 5px 9px; }
 .view-tab.active { background: var(--surface2); color: var(--text); }
 
+.icon-btn { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+            color: var(--text); width: 34px; height: 34px; display: inline-flex;
+            align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+.icon-btn:hover { border-color: var(--text); }
+.icon-btn svg { width: 17px; height: 17px; }
+
 .filter-tabs { display: flex; gap: 4px; }
 .filter-tab { background: none; border: 1px solid var(--border); border-radius: 20px;
               color: var(--muted); padding: 4px 10px; font-size: 12px; cursor: pointer;
@@ -201,6 +207,29 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                   padding: 10px; white-space: pre-wrap; }
 .summary-output.error { border-color: rgba(239,68,68,.5); color: #fecaca; }
 
+/* ── Share modal ── */
+.share-modal { position: fixed; inset: 0; z-index: 40; display: none;
+               align-items: center; justify-content: center; padding: 18px;
+               background: rgba(0,0,0,.58); backdrop-filter: blur(6px); }
+.share-modal.open { display: flex; }
+.share-panel { width: min(440px, 100%); background: var(--surface);
+               border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+               display: grid; gap: 14px; box-shadow: 0 24px 70px rgba(0,0,0,.55); }
+.share-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.share-kicker { color: var(--summary); font-size: 11px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; }
+.share-title { font-size: 16px; font-weight: 800; margin-top: 2px; }
+.share-qr-wrap { background: #fff; border-radius: 12px; padding: 16px; display: flex; justify-content: center; }
+.share-qr { width: 240px; height: 240px; image-rendering: pixelated; }
+.share-url { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+             padding: 10px 12px; color: var(--text); font-size: 12px; line-height: 1.45;
+             word-break: break-all; }
+.share-meta { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.share-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+                 border-radius: 8px; padding: 9px 12px; font-size: 13px; font-weight: 700;
+                 cursor: pointer; }
+.btn-secondary:hover { border-color: var(--text); }
+
 /* ── Empty state ── */
 .empty-state { text-align: center; color: var(--muted); padding: 60px 20px;
                display: none; flex-direction: column; align-items: center; gap: 10px; }
@@ -251,6 +280,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <button class="view-tab active" data-view="feed">Log</button>
         <button class="view-tab" data-view="incidents">Incidents</button>
       </div>
+      <button class="icon-btn" id="share-btn" title="Share login QR" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -268,6 +303,32 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   </div>
 </div>
 
+<!-- Share modal -->
+<div class="share-modal" id="share-modal">
+  <div class="share-panel">
+    <div class="share-head">
+      <div>
+        <div class="share-kicker">Login QR Code</div>
+        <div class="share-title" id="share-title">Loading…</div>
+      </div>
+      <button class="icon-btn" id="share-close" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="share-qr-wrap"><img class="share-qr" id="share-qr" src="" alt="QR code"></div>
+    <div class="share-url" id="share-url"></div>
+    <div class="share-meta" id="share-meta"></div>
+    <div class="share-actions">
+      <button class="btn-secondary" id="share-copy">Copy link</button>
+      <select class="btn-secondary" id="share-for">
+        <option value="">Loading users…</option>
+      </select>
+    </div>
+  </div>
+</div>
+
 <!-- Summary dock -->
 <div id="summary-dock">
   <div class="summary-dock-inner">
@@ -278,12 +339,14 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v11';
+const APP_VERSION = 'v12';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
-let AUTH = sessionStorage.getItem('p25_auth') || '';
+let AUTH  = sessionStorage.getItem('p25_auth')  || '';
+let TOKEN = sessionStorage.getItem('p25_token') || '';
 
 function authHeader() {
+  if (TOKEN) return { 'Authorization': 'Bearer ' + TOKEN };
   return AUTH ? { 'Authorization': 'Basic ' + AUTH } : {};
 }
 
@@ -308,6 +371,7 @@ document.getElementById('login-btn').onclick = async () => {
     document.getElementById('summary-dock').style.display = 'block';
     init(result.data);
     updateSummaryButtonCooldown();
+    checkShareAccess();
   } else {
     document.getElementById('login-error').style.display = 'block';
   }
@@ -317,8 +381,33 @@ document.getElementById('login-pass').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('login-btn').click();
 });
 
+// QR scan auto-login: /?token=...
+(async () => {
+  const params = new URLSearchParams(window.location.search);
+  const urlToken = params.get('token');
+  if (!urlToken) return;
+  history.replaceState(null, '', window.location.pathname);
+  const r = await fetch('/api/state', { headers: { 'Authorization': 'Bearer ' + urlToken }, cache: 'no-store' });
+  if (r.ok) {
+    TOKEN = urlToken;
+    AUTH  = '';
+    sessionStorage.setItem('p25_token', TOKEN);
+    sessionStorage.removeItem('p25_auth');
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    document.getElementById('summary-dock').style.display = 'block';
+    init(await r.json());
+    updateSummaryButtonCooldown();
+    checkShareAccess();
+  } else {
+    const err = document.getElementById('login-error');
+    err.textContent = 'QR code expired or invalid';
+    err.style.display = 'block';
+  }
+})();
+
 // Auto-login if we have stored creds
-if (AUTH) {
+if (AUTH || TOKEN) {
   (async () => {
     const r = await fetch('/api/state', { headers: authHeader(), cache: 'no-store' });
     if (r.ok) {
@@ -327,9 +416,11 @@ if (AUTH) {
       document.getElementById('summary-dock').style.display = 'block';
       init(await r.json());
       updateSummaryButtonCooldown();
+      checkShareAccess();
     } else {
-      AUTH = '';
+      AUTH = ''; TOKEN = '';
       sessionStorage.removeItem('p25_auth');
+      sessionStorage.removeItem('p25_token');
     }
   })();
 }
@@ -588,11 +679,14 @@ function startPolling() {
 }
 
 function currentUsername() {
-  try {
-    return AUTH ? atob(AUTH).split(':', 1)[0] : '';
-  } catch (e) {
-    return '';
+  if (TOKEN) {
+    try {
+      const part = TOKEN.split('.')[0].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = part + '='.repeat((4 - part.length % 4) % 4);
+      return JSON.parse(atob(padded)).u || '';
+    } catch (e) { return ''; }
   }
+  try { return AUTH ? atob(AUTH).split(':', 1)[0] : ''; } catch (e) { return ''; }
 }
 
 function viewerCooldownKey() {
@@ -746,6 +840,65 @@ summaryRun.onclick = async () => {
     summaryRun.disabled = false;
   }
 };
+
+// ── Share / QR ────────────────────────────────────────────────────────────────
+let shareUsers = [];
+
+async function checkShareAccess() {
+  const r = await fetch('/api/users', { headers: authHeader(), cache: 'no-store' });
+  const btn = document.getElementById('share-btn');
+  if (r.ok) {
+    shareUsers = await r.json();
+    const sel = document.getElementById('share-for');
+    sel.innerHTML = shareUsers.map(u => `<option value="${u.username}">${u.username}</option>`).join('');
+    btn.style.display = '';
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+document.getElementById('share-btn').onclick = async () => {
+  const modal  = document.getElementById('share-modal');
+  const qrImg  = document.getElementById('share-qr');
+  const urlEl  = document.getElementById('share-url');
+  const metaEl = document.getElementById('share-meta');
+  const title  = document.getElementById('share-title');
+  const copyBtn = document.getElementById('share-copy');
+  const sel    = document.getElementById('share-for');
+  modal.classList.add('open');
+  qrImg.src = '';
+  urlEl.textContent = 'Loading…';
+  metaEl.textContent = '';
+  try {
+    const r = await fetch('/api/login/share', {
+      method: 'POST',
+      headers: { ...authHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl_seconds: 86400, for_username: sel.value }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    qrImg.src  = data.qr_data_url;
+    urlEl.textContent  = data.url;
+    title.textContent  = `${data.username} · expires ${data.expires_at.slice(11, 16)}`;
+    metaEl.textContent = 'Scan to log in. Valid for 24 hours.';
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(data.url).then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1500);
+      });
+    };
+    sel.onchange = () => document.getElementById('share-btn').click();
+  } catch (e) {
+    urlEl.textContent = 'Error: ' + e.message;
+  }
+};
+
+document.getElementById('share-close').onclick = () =>
+  document.getElementById('share-modal').classList.remove('open');
+document.getElementById('share-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('share-modal'))
+    document.getElementById('share-modal').classList.remove('open');
+});
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 function init(data) {
