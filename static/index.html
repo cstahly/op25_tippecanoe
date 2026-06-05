@@ -62,6 +62,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .live-dot.dead { background: var(--fire); animation: none; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 
+.view-tabs { display: flex; gap: 4px; background: var(--bg); border: 1px solid var(--border);
+             border-radius: 8px; padding: 3px; }
+.view-tab { background: transparent; border: 0; border-radius: 5px; color: var(--muted);
+            cursor: pointer; font-size: 12px; font-weight: 700; padding: 5px 9px; }
+.view-tab.active { background: var(--surface2); color: var(--text); }
+
 .filter-tabs { display: flex; gap: 4px; }
 .filter-tab { background: none; border: 1px solid var(--border); border-radius: 20px;
               color: var(--muted); padding: 4px 10px; font-size: 12px; cursor: pointer;
@@ -72,7 +78,8 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .filter-tab[data-filter="ems"].active     { color: var(--ems);    border-color: var(--ems);    }
 
 /* ── Feed ── */
-#feed { flex: 1; overflow-y: auto; padding: 12px 16px 180px; }
+#feed, #incidents { flex: 1; overflow-y: auto; padding: 12px 16px 180px; }
+#incidents { display: none; }
 
 .incident-group { margin-bottom: 20px; }
 .incident-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
@@ -120,6 +127,39 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .summary-text { padding: 8px 14px 12px; font-size: 13px; line-height: 1.65;
                 color: var(--text); white-space: pre-wrap; }
 
+/* ── Incident board ── */
+.incident-board { max-width: 980px; margin: 0 auto; display: grid;
+                  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+.incident-card { background: var(--surface); border: 1px solid var(--border);
+                 border-radius: 8px; overflow: hidden; min-height: 190px;
+                 display: flex; flex-direction: column; }
+.incident-card[data-kind="active"] { border-top: 3px solid var(--summary); }
+.incident-card[data-kind="clear"] { border-top: 3px solid var(--ems); opacity: .82; }
+.incident-card[data-kind="routine"] { border-top: 3px solid var(--other); }
+.incident-card[data-kind="watch"] { border-top: 3px solid var(--police); }
+.incident-card-head { padding: 12px 13px 8px; display: grid; gap: 7px; }
+.incident-card-title { font-size: 15px; font-weight: 800; line-height: 1.25; }
+.incident-meta-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.incident-pill { border: 1px solid var(--border); border-radius: 999px; color: var(--muted);
+                 font-size: 10px; font-weight: 800; letter-spacing: .35px;
+                 padding: 3px 7px; text-transform: uppercase; }
+.incident-pill.status-active { border-color: rgba(245,158,11,.55); color: var(--summary); }
+.incident-pill.status-clear { border-color: rgba(34,197,94,.55); color: var(--ems); }
+.incident-pill.status-routine { border-color: rgba(107,114,128,.65); color: var(--muted); }
+.incident-location { color: var(--text); font-size: 12px; line-height: 1.35; }
+.incident-agency { color: var(--muted); font-size: 12px; }
+.incident-details { border-top: 1px solid var(--border); padding: 10px 13px 12px;
+                    display: grid; gap: 7px; font-size: 12px; line-height: 1.45; }
+.incident-detail { color: var(--text); }
+.incident-detail::before { content: ""; display: inline-block; width: 5px; height: 5px;
+                           border-radius: 50%; background: var(--summary);
+                           margin: 0 7px 2px 0; opacity: .8; }
+.incident-foot { margin-top: auto; border-top: 1px solid var(--border);
+                 display: flex; justify-content: space-between; gap: 8px;
+                 padding: 8px 13px; color: var(--muted); font-family: monospace;
+                 font-size: 11px; }
+.incident-empty { color: var(--muted); text-align: center; padding: 70px 20px; }
+
 /* ── Summary dock ── */
 #summary-dock { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
                 display: none; background: rgba(13,17,23,.96);
@@ -151,7 +191,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .empty-state svg { opacity: .3; }
 
 @media (max-width: 640px) {
-  #feed { padding-bottom: 220px; }
+  header { align-items: stretch; flex-wrap: wrap; height: auto; padding: 8px 10px; }
+  .header-title { min-width: 180px; }
+  .view-tabs { order: 3; width: 100%; }
+  .view-tab { flex: 1; }
+  .filter-tabs { order: 4; width: 100%; overflow-x: auto; }
+  #feed, #incidents { padding: 10px 10px 220px; }
   .summary-dock-inner { grid-template-columns: 1fr; }
   .summary-run { width: 100%; }
 }
@@ -176,6 +221,10 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   <header>
     <div class="live-dot" id="live-dot"></div>
     <div class="header-title">P25 Monitor <span>Tippecanoe County</span></div>
+    <div class="view-tabs">
+      <button class="view-tab active" data-view="feed">Log</button>
+      <button class="view-tab" data-view="incidents">Incidents</button>
+    </div>
     <div class="filter-tabs">
       <button class="filter-tab active" data-filter="all">All</button>
       <button class="filter-tab" data-filter="police">Police</button>
@@ -192,6 +241,9 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
       <div>No traffic yet</div>
       <div style="font-size:12px">Waiting for OP25 transmissions…</div>
     </div>
+  </div>
+  <div id="incidents">
+    <div class="incident-empty">No summarized incidents yet</div>
   </div>
 </div>
 
@@ -214,7 +266,7 @@ function authHeader() {
 
 async function tryLogin(user, pass) {
   const creds = btoa(user + ':' + pass);
-  const r = await fetch('/api/entries', { headers: { 'Authorization': 'Basic ' + creds } });
+  const r = await fetch('/api/state', { headers: { 'Authorization': 'Basic ' + creds }, cache: 'no-store' });
   if (r.ok) {
     AUTH = creds;
     sessionStorage.setItem('p25_auth', AUTH);
@@ -244,7 +296,7 @@ document.getElementById('login-pass').addEventListener('keydown', e => {
 // Auto-login if we have stored creds
 if (AUTH) {
   (async () => {
-    const r = await fetch('/api/entries', { headers: authHeader() });
+    const r = await fetch('/api/state', { headers: authHeader(), cache: 'no-store' });
     if (r.ok) {
       document.getElementById('login-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
@@ -259,7 +311,9 @@ if (AUTH) {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let entries  = [];
+let incidents = [];
 let filter   = 'all';
+let currentView = 'feed';
 let autoScroll = true;
 let lastStateSig = '';
 let pollingStarted = false;
@@ -301,17 +355,18 @@ function renderFeed() {
     const mins = timeToMins(entry.time);
     if (!cur || Math.abs(mins - cur.endMins) > 5) {
       if (cur) groups.push(cur);
-      cur = { kind: 'group', startTime: entry.time, endMins: mins, entries: [] };
+      cur = { kind: 'group', startTime: entry.time, latestTime: entry.time, endMins: mins, entries: [] };
     }
     cur.entries.push(entry);
     cur.endMins = mins;
+    cur.latestTime = entry.time;
   }
   if (cur) groups.push(cur);
 
-  const scrollBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 40;
+  const stickTop = feed.scrollTop <= 40;
 
   feed.innerHTML = '';
-  for (const g of groups) {
+  for (const g of [...groups].reverse()) {
     if (g.kind === 'summary') {
       feed.appendChild(makeSummaryCard(g.entry));
     } else {
@@ -322,18 +377,60 @@ function renderFeed() {
       div.innerHTML = `
         <div class="incident-header">
           <div class="incident-line"></div>
-          <div class="incident-time">${g.startTime}</div>
+          <div class="incident-time">${g.latestTime}</div>
           <div class="incident-badge">${label}</div>
           <div class="incident-line"></div>
         </div>`;
-      for (const e of g.entries) div.appendChild(makeTxCard(e));
+      for (const e of [...g.entries].reverse()) div.appendChild(makeTxCard(e));
       feed.appendChild(div);
     }
   }
 
-  if (autoScroll || scrollBottom) {
-    feed.scrollTop = feed.scrollHeight;
+  if (autoScroll || stickTop) {
+    feed.scrollTop = 0;
   }
+}
+
+function renderIncidents() {
+  const pane = document.getElementById('incidents');
+  if (!incidents.length) {
+    pane.innerHTML = '<div class="incident-empty">No summarized incidents yet</div>';
+    return;
+  }
+  const board = document.createElement('div');
+  board.className = 'incident-board';
+  for (const incident of incidents) {
+    board.appendChild(makeIncidentCard(incident));
+  }
+  pane.innerHTML = '';
+  pane.appendChild(board);
+}
+
+function makeIncidentCard(incident) {
+  const card = document.createElement('div');
+  const kind = incident.status_kind || 'watch';
+  card.className = 'incident-card';
+  card.dataset.kind = kind;
+  const statusClass = `status-${kind}`;
+  const details = (incident.details || []).slice(0, 5)
+    .map(d => `<div class="incident-detail">${escHtml(d)}</div>`)
+    .join('');
+  card.innerHTML = `
+    <div class="incident-card-head">
+      <div class="incident-card-title">${escHtml(incident.title || 'Incident')}</div>
+      <div class="incident-meta-row">
+        <span class="incident-pill ${statusClass}">${escHtml(incident.status || 'WATCH')}</span>
+        <span class="incident-pill">${escHtml(incident.agency || 'Unknown')}</span>
+      </div>
+      ${incident.location ? `<div class="incident-location">${escHtml(incident.location)}</div>` : ''}
+      <div class="incident-agency">${escHtml(incident.agency || 'Unknown agency')}</div>
+    </div>
+    <div class="incident-details">${details || '<div class="incident-detail">Awaiting a cleaner summary update.</div>'}</div>
+    <div class="incident-foot">
+      <span>updated ${escHtml(incident.last_seen || incident.summary_time || '')}</span>
+      <span>${Number(incident.updates || 1)} update${Number(incident.updates || 1) === 1 ? '' : 's'}</span>
+    </div>`;
+  return card;
 }
 
 function makeTxCard(entry) {
@@ -391,11 +488,18 @@ async function syncEntries() {
     const r = await fetch('/api/state', { headers: authHeader(), cache: 'no-store' });
     if (!r.ok) return false;
     const state = await r.json();
-    const sig = entriesSignature(state.entries);
+    const sig = JSON.stringify({
+      entries: entriesSignature(state.entries || []),
+      incidents: state.incidents || [],
+      log_size: state.log_size,
+      log_mtime: state.log_mtime,
+    });
     if (sig !== lastStateSig) {
-      entries = state.entries;
+      entries = state.entries || [];
+      incidents = state.incidents || [];
       lastStateSig = sig;
       renderFeed();
+      renderIncidents();
     }
     return true;
   } catch (e) {
@@ -422,8 +526,27 @@ document.querySelectorAll('.filter-tab').forEach(btn => {
 // ── Auto-scroll detection ─────────────────────────────────────────────────────
 document.getElementById('feed').addEventListener('scroll', () => {
   const feed = document.getElementById('feed');
-  autoScroll = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 60;
+  autoScroll = feed.scrollTop <= 60;
 });
+
+document.querySelectorAll('.view-tab').forEach(btn => {
+  btn.onclick = () => {
+    setView(btn.dataset.view, true);
+  };
+});
+
+function setView(view, updateHash = false) {
+  currentView = view === 'incidents' ? 'incidents' : 'feed';
+  document.querySelectorAll('.view-tab').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === currentView);
+  });
+  document.getElementById('feed').style.display = currentView === 'feed' ? 'block' : 'none';
+  document.getElementById('incidents').style.display = currentView === 'incidents' ? 'block' : 'none';
+  document.querySelector('.filter-tabs').style.display = currentView === 'feed' ? 'flex' : 'none';
+  if (updateHash) location.hash = currentView === 'incidents' ? 'incidents' : '';
+}
+
+window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
 
 // ── SSE live stream ───────────────────────────────────────────────────────────
 async function startStream() {
@@ -532,9 +655,17 @@ summaryRun.onclick = async () => {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 function init(data) {
-  entries = data;
-  lastStateSig = entriesSignature(entries);
+  entries = Array.isArray(data) ? data : (data.entries || []);
+  incidents = Array.isArray(data) ? [] : (data.incidents || []);
+  lastStateSig = JSON.stringify({
+    entries: entriesSignature(entries),
+    incidents,
+    log_size: Array.isArray(data) ? 0 : data.log_size,
+    log_mtime: Array.isArray(data) ? 0 : data.log_mtime,
+  });
   renderFeed();
+  renderIncidents();
+  setView(location.hash.slice(1));
   startPolling();
   startStream();
 }
