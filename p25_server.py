@@ -4,8 +4,9 @@ P25 web app backend.
   uvicorn p25_server:app --host 0.0.0.0 --port 8765
 Auth: P25_USER / P25_PASSWORD env vars (defaults: p25 / scanner)
 """
-import os, re, json, asyncio, secrets
+import base64, hashlib, hmac, os, re, json, asyncio, secrets, time
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -13,7 +14,6 @@ import anthropic
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 LOG_FILE = Path.home() / "op25_tippecanoe/p25_log.txt"
@@ -23,10 +23,64 @@ USERNAME = os.environ.get("P25_USER", "p25")
 PASSWORD = os.environ.get("P25_PASSWORD", "scanner")
 SUMMARY_MARKER = "=== SUMMARY ==="
 DEFAULT_SUMMARY_LIMIT = 0
+DEFAULT_SHARE_TOKEN_SECONDS = 24 * 60 * 60
 RATE_LIMITS: dict[str, float] = {}
+TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
 
 app = FastAPI()
-security = HTTPBasic()
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+def _b64url_decode(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+def _token_secret_bytes() -> bytes:
+    secret = TOKEN_SECRET or f"{USERNAME}:{PASSWORD}:{SUMMARY_MARKER}"
+    return secret.encode()
+
+def _sign_token_payload(payload: str) -> str:
+    digest = hmac.new(_token_secret_bytes(), payload.encode(), hashlib.sha256).digest()
+    return _b64url_encode(digest)
+
+def _make_login_token(username: str, ttl_seconds: int = DEFAULT_SHARE_TOKEN_SECONDS) -> tuple[str, int]:
+    exp = int(time.time()) + int(ttl_seconds)
+    payload = json.dumps({"u": username, "exp": exp}, separators=(",", ":"), sort_keys=True)
+    token = f"{_b64url_encode(payload.encode())}.{_sign_token_payload(payload)}"
+    return token, exp
+
+def _verify_login_token(token: str) -> str:
+    try:
+        payload_b64, signature = token.split(".", 1)
+        payload = _b64url_decode(payload_b64).decode()
+        expected = _sign_token_payload(payload)
+        if not secrets.compare_digest(expected, signature):
+            raise ValueError("bad signature")
+        data = json.loads(payload)
+        username = str(data.get("u", "")).strip()
+        exp = int(data.get("exp", 0))
+        if not username or exp <= int(time.time()):
+            raise ValueError("expired")
+        return username
+    except Exception as exc:
+        raise HTTPException(401, detail="Invalid login token") from exc
+
+def _qr_data_url(text: str) -> str:
+    import qrcode
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=2, box_size=8)
+    qr.add_data(text)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+def _public_base_url(request: Request) -> str:
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
+    proto = request.headers.get("x-forwarded-proto")
+    if not proto:
+        proto = "https" if host and not host.startswith(("127.0.0.1", "localhost")) else request.url.scheme
+    return f"{proto}://{host}"
 
 def _load_users() -> dict[str, dict]:
     users = {
@@ -55,15 +109,36 @@ def _load_users() -> dict[str, dict]:
             pass
     return users
 
-def require_auth(creds: HTTPBasicCredentials = Depends(security)):
+def require_auth(request: Request):
     users = _load_users()
-    user = users.get(creds.username)
-    if user and secrets.compare_digest(creds.password.encode(), user["password"].encode()):
-        return {
-            "username": creds.username,
-            "summarize_interval_seconds": int(user.get("summarize_interval_seconds", DEFAULT_SUMMARY_LIMIT)),
-        }
-    raise HTTPException(401, headers={"WWW-Authenticate": "Basic"})
+    auth_header = request.headers.get("authorization", "").strip()
+
+    if auth_header.lower().startswith("bearer "):
+        username = _verify_login_token(auth_header[7:].strip())
+        user = users.get(username)
+        if user:
+            return {
+                "username": username,
+                "summarize_interval_seconds": int(user.get("summarize_interval_seconds", DEFAULT_SUMMARY_LIMIT)),
+                "auth_mode": "bearer",
+            }
+
+    if auth_header.lower().startswith("basic "):
+        try:
+            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+            username, sep, password = decoded.partition(":")
+            if sep:
+                user = users.get(username)
+                if user and secrets.compare_digest(password.encode(), user["password"].encode()):
+                    return {
+                        "username": username,
+                        "summarize_interval_seconds": int(user.get("summarize_interval_seconds", DEFAULT_SUMMARY_LIMIT)),
+                        "auth_mode": "basic",
+                    }
+        except Exception:
+            pass
+
+    raise HTTPException(401, detail="Unauthorized")
 
 def check_summary_rate_limit(auth: dict):
     interval = int(auth.get("summarize_interval_seconds", 0))
@@ -355,6 +430,24 @@ Note any unresolved situations. Be direct and concise."""
 
 class SummarizeReq(BaseModel):
     note: str = ""
+
+class ShareLoginReq(BaseModel):
+    ttl_seconds: int = DEFAULT_SHARE_TOKEN_SECONDS
+
+@app.post("/api/login/share")
+def share_login(req: ShareLoginReq, request: Request, auth: dict = Depends(require_auth)):
+    ttl = max(300, min(int(req.ttl_seconds or DEFAULT_SHARE_TOKEN_SECONDS), 7 * 24 * 60 * 60))
+    token, exp = _make_login_token(auth["username"], ttl)
+    share_path = f"/?token={token}"
+    share_url = f"{_public_base_url(request)}{share_path}"
+    return JSONResponse({
+        "username": auth["username"],
+        "token": token,
+        "url": share_url,
+        "qr_data_url": _qr_data_url(share_url),
+        "expires_at": datetime.fromtimestamp(exp).isoformat(timespec="seconds"),
+        "ttl_seconds": ttl,
+    }, headers={"Cache-Control": "no-store"})
 
 @app.post("/api/summarize")
 async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
