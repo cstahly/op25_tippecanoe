@@ -154,6 +154,10 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .incident-pill.status-clear { border-color: rgba(34,197,94,.55); color: var(--ems); }
 .incident-pill.status-routine { border-color: rgba(107,114,128,.65); color: var(--muted); }
 .incident-location { color: var(--text); font-size: 12px; line-height: 1.35; }
+.incident-location a,
+.summary-md a.map-link { color: #93c5fd; text-decoration: none; }
+.incident-location a:hover,
+.summary-md a.map-link:hover { text-decoration: underline; }
 .incident-agency { color: var(--muted); font-size: 12px; }
 .incident-details { border-top: 1px solid var(--border); padding: 10px 13px 12px;
                     display: grid; gap: 7px; font-size: 12px; line-height: 1.45; }
@@ -274,7 +278,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v10';
+const APP_VERSION = 'v11';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH = sessionStorage.getItem('p25_auth') || '';
@@ -419,7 +423,7 @@ function makeIncidentCard(incident) {
         <span class="incident-pill ${statusClass}">${escHtml(incident.status || 'WATCH')}</span>
         <span class="incident-pill">${escHtml(incident.agency || 'Unknown')}</span>
       </div>
-      ${incident.location ? `<div class="incident-location">${escHtml(incident.location)}</div>` : ''}
+      ${incident.location ? `<div class="incident-location">${mapLocationHtml(incident.location)}</div>` : ''}
       <div class="incident-agency">${escHtml(incident.agency || 'Unknown agency')}</div>
     </div>
     <div class="incident-details">${details || '<div class="incident-detail">Awaiting a cleaner summary update.</div>'}</div>
@@ -473,6 +477,15 @@ function escHtml(t) {
   return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function mapSearchUrl(text) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(text)}`;
+}
+
+function mapLocationHtml(text) {
+  const safe = escHtml(text);
+  return `<a class="map-link" href="${mapSearchUrl(text)}" target="_blank" rel="noopener noreferrer">${safe}</a>`;
+}
+
 function renderInlineMarkdown(text) {
   return escHtml(text)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -508,10 +521,23 @@ function renderSummaryMarkdown(text) {
     }
     const bullet = line.match(/^[-*]\s+(.+)$/);
     if (bullet) {
-      list.push(renderInlineMarkdown(bullet[1]));
+      const item = bullet[1];
+      const bulletLocation = item.match(/^(Location|Address)\s*:\s*(.+)$/i);
+      if (bulletLocation) {
+        list.push(`<strong>${escHtml(bulletLocation[1])}:</strong> ${mapLocationHtml(bulletLocation[2])}`);
+      } else {
+        list.push(renderInlineMarkdown(item));
+      }
       continue;
     }
     flushList();
+    const locationLine = line.match(/^(Location|Address)\s*:\s*(.+)$/i);
+    if (locationLine) {
+      const label = locationLine[1];
+      const value = locationLine[2];
+      html.push(`<p><strong>${escHtml(label)}:</strong> ${mapLocationHtml(value)}</p>`);
+      continue;
+    }
     const cls = /^(⚠|WARNING|UNRESOLVED|ACTION)/i.test(line) ? ' class="summary-alert"' : '';
     html.push(`<p${cls}>${renderInlineMarkdown(line)}</p>`);
   }
