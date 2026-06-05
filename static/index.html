@@ -303,6 +303,7 @@ document.getElementById('login-btn').onclick = async () => {
     document.getElementById('app').style.display = 'flex';
     document.getElementById('summary-dock').style.display = 'block';
     init(result.data);
+    updateSummaryButtonCooldown();
   } else {
     document.getElementById('login-error').style.display = 'block';
   }
@@ -321,6 +322,7 @@ if (AUTH) {
       document.getElementById('app').style.display = 'flex';
       document.getElementById('summary-dock').style.display = 'block';
       init(await r.json());
+      updateSummaryButtonCooldown();
     } else {
       AUTH = '';
       sessionStorage.removeItem('p25_auth');
@@ -336,6 +338,7 @@ let filter   = 'all';
 let currentView = 'feed';
 let lastStateSig = '';
 let pollingStarted = false;
+let summaryCooldownTimer = null;
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function timeToMins(t) {
@@ -558,6 +561,47 @@ function startPolling() {
   setInterval(syncEntries, 2000);
 }
 
+function currentUsername() {
+  try {
+    return AUTH ? atob(AUTH).split(':', 1)[0] : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function viewerCooldownKey() {
+  return 'p25_viewer_summary_ready_at';
+}
+
+function updateSummaryButtonCooldown() {
+  if (summaryCooldownTimer) {
+    clearInterval(summaryCooldownTimer);
+    summaryCooldownTimer = null;
+  }
+  const readyAt = Number(localStorage.getItem(viewerCooldownKey()) || 0);
+  const remaining = Math.max(0, Math.ceil((readyAt - Date.now()) / 1000));
+  const btn = document.getElementById('summary-run');
+  if (!btn) return;
+  if (currentUsername() !== 'viewer' || remaining <= 0) {
+    btn.disabled = false;
+    btn.classList.remove('running');
+    btn.textContent = 'Summarize';
+    return;
+  }
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((readyAt - Date.now()) / 1000));
+    if (left <= 0) {
+      localStorage.removeItem(viewerCooldownKey());
+      updateSummaryButtonCooldown();
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = `Summarize (${Math.ceil(left / 60)}:${String(left % 60).padStart(2, '0')})`;
+  };
+  tick();
+  summaryCooldownTimer = setInterval(tick, 1000);
+}
+
 // ── Filters ───────────────────────────────────────────────────────────────────
 document.querySelectorAll('.filter-tab').forEach(btn => {
   btn.onclick = () => {
@@ -641,8 +685,13 @@ summaryRun.onclick = async () => {
           summaryOut.classList.add('error');
           summaryOut.style.display = 'block';
           summaryOut.textContent = payload.error;
-          summaryRun.textContent = 'Summarize';
-          summaryRun.disabled = false;
+          if (payload.retry_after_seconds && currentUsername() === 'viewer') {
+            localStorage.setItem(viewerCooldownKey(), `${Date.now() + (Number(payload.retry_after_seconds) * 1000)}`);
+            updateSummaryButtonCooldown();
+          } else {
+            summaryRun.textContent = 'Summarize';
+            summaryRun.disabled = false;
+          }
           return;
         }
         if (payload.done) {
@@ -651,9 +700,13 @@ summaryRun.onclick = async () => {
           summaryNote.style.height = 'auto';
           summaryRun.classList.remove('running');
           summaryRun.textContent = 'Done';
+          if (currentUsername() === 'viewer') {
+            localStorage.setItem(viewerCooldownKey(), `${Date.now() + 15 * 60 * 1000}`);
+            updateSummaryButtonCooldown();
+          }
           setTimeout(() => {
             summaryRun.textContent = 'Summarize';
-            summaryRun.disabled = false;
+            if (currentUsername() !== 'viewer') summaryRun.disabled = false;
           }, 1200);
         }
       }

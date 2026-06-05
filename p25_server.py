@@ -22,17 +22,68 @@ STATIC   = Path(__file__).parent / "static"
 USERNAME = os.environ.get("P25_USER", "p25")
 PASSWORD = os.environ.get("P25_PASSWORD", "scanner")
 SUMMARY_MARKER = "=== SUMMARY ==="
+DEFAULT_SUMMARY_LIMIT = 0
+RATE_LIMITS: dict[str, float] = {}
 
 app = FastAPI()
 security = HTTPBasic()
 
+def _load_users() -> dict[str, dict]:
+    users = {
+        USERNAME: {
+            "password": PASSWORD,
+            "summarize_interval_seconds": DEFAULT_SUMMARY_LIMIT,
+        }
+    }
+    raw = os.environ.get("P25_EXTRA_USERS", "").strip()
+    if raw:
+        try:
+            extra = json.loads(raw)
+            if isinstance(extra, dict):
+                for username, config in extra.items():
+                    if isinstance(config, str):
+                        users[username] = {
+                            "password": config,
+                            "summarize_interval_seconds": DEFAULT_SUMMARY_LIMIT,
+                        }
+                    elif isinstance(config, dict) and config.get("password"):
+                        users[username] = {
+                            "password": str(config["password"]),
+                            "summarize_interval_seconds": int(config.get("summarize_interval_seconds", DEFAULT_SUMMARY_LIMIT)),
+                        }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return users
+
 def require_auth(creds: HTTPBasicCredentials = Depends(security)):
-    ok = (
-        secrets.compare_digest(creds.username.encode(), USERNAME.encode()) and
-        secrets.compare_digest(creds.password.encode(), PASSWORD.encode())
-    )
-    if not ok:
-        raise HTTPException(401, headers={"WWW-Authenticate": "Basic"})
+    users = _load_users()
+    user = users.get(creds.username)
+    if user and secrets.compare_digest(creds.password.encode(), user["password"].encode()):
+        return {
+            "username": creds.username,
+            "summarize_interval_seconds": int(user.get("summarize_interval_seconds", DEFAULT_SUMMARY_LIMIT)),
+        }
+    raise HTTPException(401, headers={"WWW-Authenticate": "Basic"})
+
+def check_summary_rate_limit(auth: dict):
+    interval = int(auth.get("summarize_interval_seconds", 0))
+    if interval <= 0:
+        return
+    username = auth["username"]
+    now = datetime.now().timestamp()
+    last = RATE_LIMITS.get(username, 0)
+    remaining = int(interval - (now - last))
+    if remaining > 0:
+        retry_at = datetime.fromtimestamp(last + interval).strftime("%H:%M:%S")
+        raise HTTPException(
+            429,
+            detail={
+                "error": f"Summary is rate limited. Try again at {retry_at}.",
+                "retry_after_seconds": remaining,
+            },
+            headers={"Retry-After": str(remaining)},
+        )
+    RATE_LIMITS[username] = now
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
@@ -305,8 +356,23 @@ Note any unresolved situations. Be direct and concise."""
 class SummarizeReq(BaseModel):
     note: str = ""
 
-@app.post("/api/summarize", dependencies=[Depends(require_auth)])
-async def summarize(req: SummarizeReq):
+@app.post("/api/summarize")
+async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
+    try:
+        check_summary_rate_limit(auth)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+
+        async def stream_limited():
+            yield f"data: {json.dumps({'error':detail.get('error', 'Rate limited'),'done':True,'retry_after_seconds':detail.get('retry_after_seconds', 0)})}\n\n"
+
+        return StreamingResponse(
+            stream_limited(),
+            status_code=exc.status_code,
+            media_type="text/event-stream",
+            headers={**(exc.headers or {}), "Cache-Control":"no-cache","X-Accel-Buffering":"no"},
+        )
+
     lines = read_since_last_summary()
 
     async def stream_empty():
