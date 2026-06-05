@@ -499,7 +499,8 @@ WLPD (2019, West Lafayette Police), PUPD (2119, Purdue University Police).
 10-50=accident, 10-52=ambulance needed, 10-55=DUI, 10-57=hit and run, \
 10-78=need assistance, 10-79=notify coroner. Signal 1=en route, Signal 4=arrived, Code 3=L&S.
 {note_section}
-Radio traffic since last summary (format [HH:MM:SS] [TALKGROUP] transcript):
+{mode_section}
+Radio traffic (format [HH:MM:SS] [TALKGROUP] transcript):
 {block}
 
 Summarize what has been happening. Group by incident. Translate codes. \
@@ -583,8 +584,14 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
 
     block        = "\n".join(lines)
     note_section = f"\nOperator note: {req.note}\n" if req.note else ""
-    prompt       = PROMPT_TEMPLATE.format(note_section=note_section, block=block)
-    max_tokens   = 4096 if req.full else 1024
+    mode_section = (
+        "This is a FULL LOG SUMMARY covering the entire session from the beginning. "
+        "Cover every incident — dispatches, responses, closures, and anything still open. "
+        "For each incident show its full arc: when it was called, who responded, current status. "
+        "Be comprehensive; do not skip incidents because they resolved."
+    ) if req.full else "This is an INCREMENTAL UPDATE covering only traffic since the last summary."
+    prompt       = PROMPT_TEMPLATE.format(note_section=note_section, mode_section=mode_section, block=block)
+    max_tokens   = 16000 if req.full else 1024
 
     async def stream_summary() -> AsyncGenerator[str, None]:
         if not os.environ.get("ANTHROPIC_API_KEY"):
