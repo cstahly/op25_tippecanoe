@@ -57,6 +57,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
          gap: 12px; flex-shrink: 0; position: sticky; top: 0; z-index: 10; }
 .header-title { font-size: 15px; font-weight: 700; letter-spacing: .3px; flex: 1; }
 .header-title span { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+.update-status { color: var(--muted); font-family: monospace; font-size: 11px; white-space: nowrap; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ems);
             animation: pulse 2s infinite; }
 .live-dot.dead { background: var(--fire); animation: none; }
@@ -193,6 +194,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 @media (max-width: 640px) {
   header { align-items: stretch; flex-wrap: wrap; height: auto; padding: 8px 10px; }
   .header-title { min-width: 180px; }
+  .update-status { margin-left: auto; }
   .view-tabs { order: 3; width: 100%; }
   .view-tab { flex: 1; }
   .filter-tabs { order: 4; width: 100%; overflow-x: auto; }
@@ -221,6 +223,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   <header>
     <div class="live-dot" id="live-dot"></div>
     <div class="header-title">P25 Monitor <span>Tippecanoe County</span></div>
+    <div class="update-status" id="update-status">starting</div>
     <div class="view-tabs">
       <button class="view-tab active" data-view="feed">Log</button>
       <button class="view-tab" data-view="incidents">Incidents</button>
@@ -314,7 +317,6 @@ let entries  = [];
 let incidents = [];
 let filter   = 'all';
 let currentView = 'feed';
-let autoScroll = true;
 let lastStateSig = '';
 let pollingStarted = false;
 
@@ -363,8 +365,6 @@ function renderFeed() {
   }
   if (cur) groups.push(cur);
 
-  const stickTop = feed.scrollTop <= 40;
-
   feed.innerHTML = '';
   for (const g of [...groups].reverse()) {
     if (g.kind === 'summary') {
@@ -386,9 +386,7 @@ function renderFeed() {
     }
   }
 
-  if (autoScroll || stickTop) {
-    feed.scrollTop = 0;
-  }
+  feed.scrollTop = 0;
 }
 
 function renderIncidents() {
@@ -484,9 +482,11 @@ function entriesSignature(list) {
 }
 
 async function syncEntries() {
+  const dot = document.getElementById('live-dot');
+  const status = document.getElementById('update-status');
   try {
     const r = await fetch('/api/state', { headers: authHeader(), cache: 'no-store' });
-    if (!r.ok) return false;
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const state = await r.json();
     const sig = JSON.stringify({
       entries: entriesSignature(state.entries || []),
@@ -501,8 +501,12 @@ async function syncEntries() {
       renderFeed();
       renderIncidents();
     }
+    dot.classList.remove('dead');
+    status.textContent = `${new Date().toLocaleTimeString()} · ${entries.length}`;
     return true;
   } catch (e) {
+    dot.classList.add('dead');
+    status.textContent = `stale · ${e.message}`;
     return false;
   }
 }
@@ -523,12 +527,6 @@ document.querySelectorAll('.filter-tab').forEach(btn => {
   };
 });
 
-// ── Auto-scroll detection ─────────────────────────────────────────────────────
-document.getElementById('feed').addEventListener('scroll', () => {
-  const feed = document.getElementById('feed');
-  autoScroll = feed.scrollTop <= 60;
-});
-
 document.querySelectorAll('.view-tab').forEach(btn => {
   btn.onclick = () => {
     setView(btn.dataset.view, true);
@@ -547,38 +545,6 @@ function setView(view, updateHash = false) {
 }
 
 window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
-
-// ── SSE live stream ───────────────────────────────────────────────────────────
-async function startStream() {
-  const dot = document.getElementById('live-dot');
-  while (true) {
-    try {
-      const resp = await fetch('/api/stream', { headers: authHeader() });
-      if (!resp.ok) { await sleep(5000); continue; }
-      dot.classList.remove('dead');
-      const reader = resp.body.getReader();
-      const dec    = new TextDecoder();
-      let   buf    = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split('\n\n');
-        buf = parts.pop();
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith('data:')) continue;
-          const payload = JSON.parse(line.slice(5).trim());
-          if (payload.type === 'tx' || payload.type === 'summary_start') syncEntries();
-        }
-      }
-    } catch (e) { /* reconnect */ }
-    dot.classList.add('dead');
-    await sleep(3000);
-  }
-}
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Summary dock ──────────────────────────────────────────────────────────────
 const summaryNote = document.getElementById('summary-note');
@@ -667,7 +633,7 @@ function init(data) {
   renderIncidents();
   setView(location.hash.slice(1));
   startPolling();
-  startStream();
+  syncEntries();
 }
 </script>
 </body>

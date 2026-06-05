@@ -11,7 +11,7 @@ from typing import AsyncGenerator
 
 import anthropic
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -234,6 +234,17 @@ def get_state():
 @app.get("/api/health")
 def health():
     return {"ok": True, "log_exists": LOG_FILE.exists()}
+
+@app.get("/")
+def index():
+    return FileResponse(
+        STATIC / "index.html",
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 @app.get("/api/stream", dependencies=[Depends(require_auth)])
 async def live_stream(request: Request):
