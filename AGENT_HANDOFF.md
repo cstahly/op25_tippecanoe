@@ -12,7 +12,7 @@ box with `bypassPermissions` mode enabled in Claude Code. Full sudo. RDP access.
 | **P25 decoder (OP25)** | Operational | Decoding Tippecanoe County traffic |
 | **Whisper STT** | Operational | `turbo` model, CPU, int8 |
 | **p25_summarize.py** | Operational | On-demand Claude summary, press Enter |
-| **p25_server.py (web app)** | Deployed on HTTP | systemd + nginx running; HTTPS waits for DNS |
+| **p25_server.py (web app)** | Deployed on HTTPS | systemd + nginx + Let's Encrypt running |
 | **Satellite scheduler** | **PAUSED** | All rules `"enabled": false` |
 | **ATC reception** | Manual only | Working command, not scheduled |
 
@@ -105,10 +105,12 @@ P25_PASSWORD=yourpassword python3 -m uvicorn p25_server:app --host 0.0.0.0 --por
 
 ### Current deployment state
 
+- **URL**: `https://p25.sadbabyrabbit.com`
 - **systemd**: `p25-server.service` enabled/running, reads `/etc/p25-server.env`
-- **nginx**: enabled/running, proxies `p25.sadbabyrabbit.com` on port 80 → `127.0.0.1:8765`
-- **DNS needed**: add `p25 A 104.218.151.49`
-- **HTTPS still needed**: once DNS resolves, run certbot and switch to the SSL nginx config
+- **nginx**: enabled/running, redirects HTTP to HTTPS and proxies HTTPS → `127.0.0.1:8765`
+- **Let's Encrypt**: certificate issued for `p25.sadbabyrabbit.com`, auto-renew timer enabled
+- **DNS**: `p25 A 104.218.151.49`
+- **LAN/static IP**: NetworkManager profile `ZyXEL049608` is static `192.168.4.26/22`, gateway `192.168.4.1`, DNS `1.1.1.1,8.8.8.8,192.168.4.65`
 
 HTTP nginx config:
 ```nginx
@@ -128,7 +130,7 @@ server {
 }
 ```
 
-HTTPS command to run after DNS resolves:
+HTTPS was issued with:
 ```bash
 sudo certbot --nginx -d p25.sadbabyrabbit.com
 ```
@@ -221,10 +223,9 @@ Change `-f` for other frequencies. The v-dipole antenna works for this.
 
 ## 8. Pending Work
 
-1. **Finish HTTPS** — add DNS `p25 A 104.218.151.49`, then run certbot for p25.sadbabyrabbit.com
-2. **Mast/coax planning** — user wants 3 antennas on a mast (v-dipole + Arrow Yagi + ?), 3 coax runs
-3. **Satellite scheduler** — re-enable when user is ready to resume sat work
-4. **P25 improvements** (future, explicitly deferred):
+1. **Mast/coax planning** — user wants 3 antennas on a mast (v-dipole + Arrow Yagi + ?), 3 coax runs
+2. **Satellite scheduler** — re-enable when user is ready to resume sat work
+3. **P25 improvements** (future, explicitly deferred):
    - SQLite incident database
    - Incident aggregation across talkgroups
    - Push notifications
