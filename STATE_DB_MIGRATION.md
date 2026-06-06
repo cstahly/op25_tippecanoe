@@ -50,3 +50,14 @@ Implemented in this pass:
   the cursor.
 - Full summaries are still on the earlier chunked markdown path and should be considered legacy
   until migrated to the same state-store model.
+
+Verification:
+
+- Service restarted successfully after commit `28b4c1e`.
+- SQLite seeded from `p25_log.txt` with 1,571 transmissions and 54 incidents initially.
+- Initial DB cursor: `last_summarized_tx_id=1362`, matching the first pending recovery line
+  `[21:49:30] [2009] 7-18-198`.
+- A recovery regular summary succeeded as `summary_jobs.id=1`, covering `from_tx_id=1363`
+  through `to_tx_id=1572`.
+- After recovery, `last_summarized_tx_id=1572`; two newer live transmissions were pending at
+  verification time.
