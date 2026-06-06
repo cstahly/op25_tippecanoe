@@ -142,10 +142,22 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .summary-md .summary-alert { color: #fcd34d; font-weight: 700; }
 
 /* ── Incident board ── */
+.incident-tools { max-width: 980px; margin: 0 auto 10px; display: flex; flex-wrap: wrap;
+                  gap: 8px; align-items: center; }
+.incident-search { flex: 1 1 260px; background: var(--surface); border: 1px solid var(--border);
+                   border-radius: 8px; color: var(--text); font-size: 13px;
+                   padding: 9px 10px; min-width: 0; }
+.incident-search:focus { outline: none; border-color: var(--police); }
+.incident-status-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.incident-status-tab { background: var(--surface); color: var(--muted); border: 1px solid var(--border);
+                       border-radius: 999px; padding: 7px 10px; font-size: 11px;
+                       font-weight: 800; text-transform: uppercase; cursor: pointer; }
+.incident-status-tab.active { color: var(--text); border-color: var(--police); background: rgba(59,130,246,.12); }
 .incident-board { max-width: 980px; margin: 0 auto; display: grid; gap: 8px; }
 .incident-card { background: var(--surface); border: 1px solid var(--border);
                  border-left-width: 4px; border-radius: 8px; overflow: hidden;
-                 padding: 10px 12px; display: grid; gap: 8px; }
+                 padding: 10px 12px; display: grid; gap: 8px; cursor: pointer; }
+.incident-card:hover { border-color: rgba(148,163,184,.42); background: rgba(31,41,55,.72); }
 .incident-card[data-kind="active"] { border-left-color: var(--summary); }
 .incident-card[data-kind="clear"] { border-left-color: var(--ems); opacity: .82; }
 .incident-card[data-kind="routine"] { border-left-color: var(--other); }
@@ -177,6 +189,34 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                            border-radius: 50%; background: var(--summary);
                            margin: 0 7px 2px 0; opacity: .8; }
 .incident-empty { color: var(--muted); text-align: center; padding: 70px 20px; }
+
+.incident-modal { position: fixed; inset: 0; z-index: 45; display: none;
+                  align-items: center; justify-content: center; padding: 18px;
+                  background: rgba(0,0,0,.62); backdrop-filter: blur(6px); }
+.incident-modal.open { display: flex; }
+.incident-panel { width: min(720px, 100%); max-height: min(760px, 92vh); overflow-y: auto;
+                  background: var(--surface); border: 1px solid var(--border);
+                  border-radius: 12px; box-shadow: 0 24px 70px rgba(0,0,0,.55);
+                  display: grid; gap: 14px; padding: 16px; }
+.incident-modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.incident-modal-kicker { color: var(--summary); font-size: 11px; font-weight: 800;
+                         letter-spacing: .5px; text-transform: uppercase; }
+.incident-modal-title { font-size: 18px; font-weight: 800; line-height: 1.25; margin-top: 3px; }
+.incident-modal-grid { display: grid; gap: 10px; }
+.incident-modal-row { display: grid; gap: 4px; }
+.incident-modal-label { color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; }
+.incident-modal-value { color: var(--text); font-size: 13px; line-height: 1.5; }
+.incident-status-controls { display: flex; flex-wrap: wrap; gap: 7px; }
+.incident-status-control { background: var(--surface2); border: 1px solid var(--border);
+                           border-radius: 8px; color: var(--text); cursor: pointer;
+                           font-size: 12px; font-weight: 800; padding: 8px 10px;
+                           text-transform: uppercase; }
+.incident-status-control.active { border-color: var(--summary); color: var(--summary); }
+.incident-status-control.clear-action { border-color: rgba(34,197,94,.55); color: var(--ems); }
+.incident-modal-details { display: grid; gap: 7px; }
+.incident-modal-error { display: none; color: #fecaca; border: 1px solid rgba(239,68,68,.45);
+                        background: rgba(127,29,29,.25); border-radius: 8px; padding: 9px 10px;
+                        font-size: 12px; }
 
 /* ── Summary dock ── */
 #summary-dock { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
@@ -246,6 +286,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   .view-tab { flex: 1; }
   .filter-tabs { overflow-x: auto; }
   #feed, #incidents { padding: 10px 10px 220px; }
+  .incident-tools { display: grid; }
   .incident-row-main { display: grid; gap: 7px; }
   .incident-meta-row { justify-content: flex-start; }
   .summary-dock-inner { grid-template-columns: 1fr; }
@@ -321,6 +362,43 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   </div>
 </div>
 
+<!-- Incident modal -->
+<div class="incident-modal" id="incident-modal">
+  <div class="incident-panel">
+    <div class="incident-modal-head">
+      <div>
+        <div class="incident-modal-kicker" id="incident-modal-kicker">Incident</div>
+        <div class="incident-modal-title" id="incident-modal-title"></div>
+      </div>
+      <button class="icon-btn" id="incident-close" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="incident-status-controls" id="incident-status-controls"></div>
+    <div class="incident-modal-error" id="incident-modal-error"></div>
+    <div class="incident-modal-grid">
+      <div class="incident-modal-row">
+        <div class="incident-modal-label">Location</div>
+        <div class="incident-modal-value" id="incident-modal-location"></div>
+      </div>
+      <div class="incident-modal-row">
+        <div class="incident-modal-label">Agency</div>
+        <div class="incident-modal-value" id="incident-modal-agency"></div>
+      </div>
+      <div class="incident-modal-row">
+        <div class="incident-modal-label">Details</div>
+        <div class="incident-modal-details" id="incident-modal-details"></div>
+      </div>
+      <div class="incident-modal-row">
+        <div class="incident-modal-label">Action</div>
+        <div class="incident-modal-value" id="incident-modal-action"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Share modal -->
 <div class="share-modal" id="share-modal">
   <div class="share-panel">
@@ -360,7 +438,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v16';
+const APP_VERSION = 'v17';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -455,6 +533,9 @@ let currentView = 'feed';
 let lastStateSig = '';
 let pollingStarted = false;
 let summaryCooldownTimer = null;
+let incidentSearch = '';
+let incidentStatusFilter = 'open';
+let selectedIncidentNumber = null;
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function timeToMins(t) {
@@ -506,17 +587,80 @@ function renderFeed() {
 
 function renderIncidents() {
   const pane = document.getElementById('incidents');
-  if (!incidents.length) {
-    pane.innerHTML = '<div class="incident-empty">No summarized incidents yet</div>';
-    return;
-  }
+  const priorSearch = document.getElementById('incident-search');
+  const restoreSearchFocus = document.activeElement === priorSearch;
+  const searchStart = priorSearch?.selectionStart || 0;
+  const searchEnd = priorSearch?.selectionEnd || searchStart;
+  const visible = filterIncidents();
+  const tools = document.createElement('div');
+  tools.className = 'incident-tools';
+  tools.innerHTML = `
+    <input class="incident-search" id="incident-search" type="search" placeholder="Search incidents" value="${escAttr(incidentSearch)}">
+    <div class="incident-status-tabs">
+      ${incidentFilterButton('open', 'Open')}
+      ${incidentFilterButton('active', 'Active')}
+      ${incidentFilterButton('watch', 'Watch')}
+      ${incidentFilterButton('routine', 'Routine')}
+      ${incidentFilterButton('clear', 'Clear')}
+      ${incidentFilterButton('all', 'All')}
+    </div>`;
   const board = document.createElement('div');
   board.className = 'incident-board';
-  for (const incident of incidents) {
+  for (const incident of visible) {
     board.appendChild(makeIncidentCard(incident));
   }
   pane.innerHTML = '';
-  pane.appendChild(board);
+  pane.appendChild(tools);
+  if (!incidents.length) {
+    pane.insertAdjacentHTML('beforeend', '<div class="incident-empty">No summarized incidents yet</div>');
+  } else if (!visible.length) {
+    pane.insertAdjacentHTML('beforeend', '<div class="incident-empty">No incidents match this filter</div>');
+  } else {
+    pane.appendChild(board);
+  }
+  const search = document.getElementById('incident-search');
+  search.oninput = e => {
+    incidentSearch = e.target.value;
+    renderIncidents();
+    document.getElementById('incident-search')?.focus();
+  };
+  pane.querySelectorAll('.incident-status-tab').forEach(btn => {
+    btn.onclick = () => {
+      incidentStatusFilter = btn.dataset.incidentFilter;
+      renderIncidents();
+    };
+  });
+  if (restoreSearchFocus) {
+    search.focus();
+    search.setSelectionRange(searchStart, searchEnd);
+  }
+}
+
+function incidentFilterButton(value, label) {
+  return `<button class="incident-status-tab ${incidentStatusFilter === value ? 'active' : ''}" data-incident-filter="${value}">${label}</button>`;
+}
+
+function filterIncidents() {
+  const q = incidentSearch.trim().toLowerCase();
+  return incidents.filter(incident => {
+    const kind = incident.status_kind || 'watch';
+    const statusMatch =
+      incidentStatusFilter === 'all' ||
+      (incidentStatusFilter === 'open' && kind !== 'clear') ||
+      kind === incidentStatusFilter;
+    if (!statusMatch) return false;
+    if (!q) return true;
+    const haystack = [
+      incident.number,
+      incident.title,
+      incident.status,
+      incident.agency,
+      incident.location,
+      incident.action,
+      ...(incident.details || []),
+    ].join(' ').toLowerCase();
+    return haystack.includes(q);
+  });
 }
 
 function makeIncidentCard(incident) {
@@ -546,6 +690,8 @@ function makeIncidentCard(incident) {
       <span class="incident-age">${escHtml(updates)}</span>
     </div>
     <div class="incident-details">${details || '<div class="incident-detail">Awaiting a cleaner summary update.</div>'}</div>`;
+  card.onclick = () => openIncidentModal(incident.number);
+  card.querySelectorAll('a').forEach(a => a.onclick = e => e.stopPropagation());
   return card;
 }
 
@@ -589,7 +735,11 @@ function makeSummaryCard(entry) {
 }
 
 function escHtml(t) {
-  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(t ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function escAttr(t) {
+  return escHtml(t).replace(/"/g,'&quot;');
 }
 
 function mapSearchUrl(text) {
@@ -600,6 +750,76 @@ function mapLocationHtml(text) {
   const safe = escHtml(text);
   return `<a class="map-link" href="${mapSearchUrl(text)}" target="_blank" rel="noopener noreferrer">${safe}</a>`;
 }
+
+function findIncident(number) {
+  return incidents.find(i => Number(i.number) === Number(number));
+}
+
+function openIncidentModal(number) {
+  selectedIncidentNumber = Number(number);
+  const incident = findIncident(selectedIncidentNumber);
+  if (!incident) return;
+  const modal = document.getElementById('incident-modal');
+  const title = incident.number ? `#${incident.number} ${incident.title || 'Incident'}` : (incident.title || 'Incident');
+  document.getElementById('incident-modal-kicker').textContent = incident.status || 'WATCH';
+  document.getElementById('incident-modal-title').textContent = title;
+  document.getElementById('incident-modal-location').innerHTML = incident.location ? mapLocationHtml(incident.location) : 'Unknown';
+  document.getElementById('incident-modal-agency').textContent = incident.agency || 'Unknown';
+  document.getElementById('incident-modal-action').textContent = incident.action || 'None';
+  document.getElementById('incident-modal-details').innerHTML = (incident.details || [])
+    .map(d => `<div class="incident-detail">${escHtml(d)}</div>`)
+    .join('') || '<div class="incident-detail">No details recorded.</div>';
+  document.getElementById('incident-modal-error').style.display = 'none';
+  renderIncidentStatusControls(incident);
+  modal.classList.add('open');
+}
+
+function renderIncidentStatusControls(incident) {
+  const statuses = ['ACTIVE', 'PENDING', 'ROUTINE', 'CLEAR'];
+  const current = String(incident.status || '').toUpperCase();
+  const controls = document.getElementById('incident-status-controls');
+  controls.innerHTML = statuses.map(status => `
+    <button class="incident-status-control ${current.includes(status) ? 'active' : ''} ${status === 'CLEAR' ? 'clear-action' : ''}" data-status="${status}">
+      ${status}
+    </button>`).join('');
+  controls.querySelectorAll('button').forEach(btn => {
+    btn.onclick = () => updateIncidentStatus(incident.number, btn.dataset.status);
+  });
+}
+
+async function updateIncidentStatus(number, status) {
+  const err = document.getElementById('incident-modal-error');
+  err.style.display = 'none';
+  try {
+    const r = await fetch(`/api/incidents/${encodeURIComponent(number)}`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const updated = await r.json();
+    incidents = incidents.map(i => Number(i.number) === Number(number) ? updated : i);
+    renderIncidents();
+    openIncidentModal(number);
+    syncEntries();
+  } catch (e) {
+    err.textContent = 'Update failed: ' + e.message;
+    err.style.display = 'block';
+  }
+}
+
+document.getElementById('incident-close').onclick = () =>
+  document.getElementById('incident-modal').classList.remove('open');
+document.getElementById('incident-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('incident-modal'))
+    document.getElementById('incident-modal').classList.remove('open');
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    document.getElementById('incident-modal').classList.remove('open');
+    document.getElementById('share-modal').classList.remove('open');
+  }
+});
 
 function renderInlineMarkdown(text) {
   return escHtml(text)
@@ -684,6 +904,9 @@ async function syncEntries() {
     lastStateSig = sig;
     renderFeed();
     renderIncidents();
+    if (document.getElementById('incident-modal').classList.contains('open') && selectedIncidentNumber) {
+      openIncidentModal(selectedIncidentNumber);
+    }
     dot.classList.remove('dead');
     const newest = entriesLatest[0];
     const newestLabel = newest ? `${newest.time} ${newest.text || newest.type}` : 'empty';

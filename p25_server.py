@@ -614,25 +614,29 @@ def incident_rows_from_db(conn: sqlite3.Connection) -> list[dict]:
         "CASE status_kind WHEN 'active' THEN 0 WHEN 'watch' THEN 1 WHEN 'routine' THEN 2 WHEN 'clear' THEN 3 ELSE 1 END, "
         "last_seen DESC"
     ).fetchall()
-    incidents = []
-    for row in rows:
-        details = json.loads(row["details_json"] or "[]")
-        incidents.append({
-            "id": f"incident-{row['number']}",
-            "number": row["number"],
-            "title": row["title"],
-            "agency": row["agency"],
-            "status": row["status"],
-            "status_kind": row["status_kind"],
-            "location": row["location"],
-            "details": details,
-            "action": row["action"],
-            "first_seen": row["first_seen"],
-            "last_seen": row["last_seen"],
-            "summary_time": row["last_seen"],
-            "updates": 1,
-        })
-    return incidents
+    return [_incident_row_to_api(row) for row in rows]
+
+def _incident_row_to_api(row: sqlite3.Row) -> dict:
+    details = json.loads(row["details_json"] or "[]")
+    return {
+        "id": f"incident-{row['number']}",
+        "number": row["number"],
+        "title": row["title"],
+        "agency": row["agency"],
+        "status": row["status"],
+        "status_kind": row["status_kind"],
+        "location": row["location"],
+        "details": details,
+        "action": row["action"],
+        "first_seen": row["first_seen"],
+        "last_seen": row["last_seen"],
+        "summary_time": row["last_seen"],
+        "updates": 1,
+    }
+
+def _incident_by_number(conn: sqlite3.Connection, number: int) -> dict | None:
+    row = conn.execute("SELECT * FROM incident_state WHERE number = ?", (number,)).fetchone()
+    return _incident_row_to_api(row) if row else None
 
 def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str) -> None:
     number = int(inc["number"])
@@ -916,6 +920,14 @@ class ShareLoginReq(BaseModel):
     ttl_seconds: int = DEFAULT_SHARE_TOKEN_SECONDS
     for_username: str = ""
 
+class IncidentUpdateReq(BaseModel):
+    title: str | None = None
+    agency: str | None = None
+    status: str | None = None
+    location: str | None = None
+    details: list[str] | None = None
+    action: str | None = None
+
 def _chunk_lines(lines: list[str], max_chars: int = 80000) -> list[list[str]]:
     chunks: list[list[str]] = []
     current: list[str] = []
@@ -1016,6 +1028,27 @@ def _incident_updates_markdown(updates: list[dict]) -> str:
             f"- Action: {inc.get('action') or 'None'}"
         )
     return "\n\n---\n\n".join(blocks)
+
+@app.post("/api/incidents/{number}")
+def update_incident(number: int, req: IncidentUpdateReq, auth: dict = Depends(require_auth)):
+    ensure_state_ready()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM incident_state WHERE number = ?", (number,)).fetchone()
+        if not row:
+            raise HTTPException(404, detail=f"Incident {number} not found")
+        current_details = json.loads(row["details_json"] or "[]")
+        inc = {
+            "number": number,
+            "title": req.title if req.title is not None else row["title"],
+            "agency": req.agency if req.agency is not None else row["agency"],
+            "status": req.status if req.status is not None else row["status"],
+            "location": req.location if req.location is not None else row["location"],
+            "details": req.details if req.details is not None else current_details,
+            "action": req.action if req.action is not None else row["action"],
+        }
+        _upsert_incident(conn, inc, now)
+        return JSONResponse(_incident_by_number(conn, number), headers={"Cache-Control": "no-store"})
 
 @app.get("/api/users")
 def list_users(auth: dict = Depends(require_auth)):
