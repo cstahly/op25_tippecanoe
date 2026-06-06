@@ -781,6 +781,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         client = anthropic.AsyncAnthropic()
         full   = ""
         try:
+            request_prompt = prompt
             if req.full:
                 chunks = _chunk_lines(lines)
                 partials = []
@@ -812,7 +813,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                     for _ in range(5):
                         await asyncio.sleep(13)
                         yield ": keepalive\n\n"
-                prompt = FULL_CONSOLIDATE_TEMPLATE.format(
+                request_prompt = FULL_CONSOLIDATE_TEMPLATE.format(
                     incident_context=incident_context,
                     block="\n\n".join(partials),
                 )
@@ -821,7 +822,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 model="claude-sonnet-4-6",
                 max_tokens=max_tokens,
                 tools=[{"type": "web_search_20260209", "name": "web_search"}],
-                messages=[{"role":"user","content":prompt}],
+                messages=[{"role":"user","content":request_prompt}],
             ) as s:
                 async for chunk in s.text_stream:
                     full += chunk
