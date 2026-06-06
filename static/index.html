@@ -523,12 +523,13 @@ function makeIncidentCard(incident) {
   card.className = 'incident-card';
   card.dataset.kind = kind;
   const statusClass = `status-${kind}`;
+  const title = incident.number ? `#${incident.number} ${incident.title || 'Incident'}` : (incident.title || 'Incident');
   const details = (incident.details || []).slice(0, 5)
     .map(d => `<div class="incident-detail">${escHtml(d)}</div>`)
     .join('');
   card.innerHTML = `
     <div class="incident-card-head">
-      <div class="incident-card-title">${escHtml(incident.title || 'Incident')}</div>
+      <div class="incident-card-title">${escHtml(title)}</div>
       <div class="incident-meta-row">
         <span class="incident-pill ${statusClass}">${escHtml(incident.status || 'WATCH')}</span>
         <span class="incident-pill">${escHtml(incident.agency || 'Unknown')}</span>

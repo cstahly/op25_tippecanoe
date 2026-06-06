@@ -211,7 +211,7 @@ SUMMARY_START      = re.compile(r'^=== SUMMARY === (.+)$')
 FULL_SUMMARY_MARKER = "=== FULL SUMMARY ==="
 FULL_SUMMARY_START  = re.compile(r'^=== FULL SUMMARY === (.+)$')
 SUMMARY_END         = '=' * 40
-INCIDENT_HEADING_RE = re.compile(r'^#{2,3}\s+\**(?:INCIDENT\s+\d+\s*:\s*)?(.+?)\**\s*$',
+INCIDENT_HEADING_RE = re.compile(r'^#{2,3}\s+\**(?:INCIDENT\s+(?:(\d+)|[A-Z])\s*:\s*)?(.+?)\**\s*$',
                                  re.IGNORECASE)
 FIELD_RE = re.compile(r'^(?:-\s+)?\**([^:*]+)\**\s*:\s*(.*)$')
 
@@ -310,12 +310,13 @@ def _extract_incidents_from_summary(entry: dict) -> list[dict]:
     for line in lines:
         heading = INCIDENT_HEADING_RE.match(line.strip())
         if heading:
-            title = _clean_md(heading.group(1))
+            number = heading.group(1)
+            title = _clean_md(heading.group(2))
             title_upper = title.upper()
             if title and not any(skip in title_upper for skip in ("INCIDENTS", "UNRESOLVED", "SUMMARY", "ASSESSMENT", "RECOMMENDATION")):
                 if current:
                     blocks.append(current)
-                current = {"title": title, "lines": []}
+                current = {"number": number, "title": title, "lines": []}
                 continue
         if current is not None:
             if line.startswith("---") or re.match(r'^#{1,2}\s+', line):
@@ -347,8 +348,10 @@ def _extract_incidents_from_summary(entry: dict) -> list[dict]:
         blob = "\n".join([title, *body_lines])
         status = fields.get("status", "WATCH")
         agency = fields.get("agency") or _agency_from_text(blob)
+        number = block.get("number")
         incidents.append({
-            "id": _incident_id(title),
+            "id": f"incident-{number}" if number else _incident_id(title),
+            "number": int(number) if number else None,
             "title": title,
             "summary_time": entry.get("time", ""),
             "agency": agency,
@@ -383,18 +386,23 @@ def derive_incidents(entries: list[dict]) -> list[dict]:
                 if incident["summary_time"] < existing["first_seen"]:
                     existing["first_seen"] = incident["summary_time"]
 
-    # Layer 1: full summaries oldest→newest (base context, lower authority)
+    # Layer 1: the latest full summary is the baseline source of truth.
     full_sums = sorted(
         [e for e in entries if e.get("type") == "summary" and e.get("full")],
         key=lambda e: e["time"],
     )
-    for entry in full_sums:
+    last_full = full_sums[-1] if full_sums else None
+    last_full_time = last_full.get("time", "") if last_full else ""
+    for entry in ([last_full] if last_full else []):
         for inc in _extract_incidents_from_summary(entry):
             _merge(inc, newer_wins=True)
 
-    # Layer 2: incremental summaries oldest→newest (override full summary data)
+    # Layer 2: incremental summaries after that full baseline override it.
     incr_sums = sorted(
-        [e for e in entries if e.get("type") == "summary" and not e.get("full")],
+        [
+            e for e in entries
+            if e.get("type") == "summary" and not e.get("full") and e.get("time", "") > last_full_time
+        ],
         key=lambda e: e["time"],
     )
     for entry in incr_sums:
@@ -426,6 +434,22 @@ def derive_incidents(entries: list[dict]) -> list[dict]:
     priority = {"active": 0, "watch": 1, "routine": 2, "clear": 3}
     ordered = sorted(merged.values(), key=lambda i: i.get("last_seen", ""), reverse=True)
     return sorted(ordered, key=lambda i: priority.get(i.get("status_kind", "watch"), 1))
+
+def incident_board_context(entries: list[dict]) -> str:
+    numbered = [inc for inc in derive_incidents(entries) if inc.get("number")]
+    if not numbered:
+        return "Existing numbered incident board: none yet. Start numbering at INCIDENT 1."
+    numbered.sort(key=lambda inc: int(inc["number"]))
+    lines = [
+        "Existing numbered incident board. Reuse these numbers for the same real-world incidents:"
+    ]
+    for inc in numbered:
+        location = inc.get("location") or "Unknown"
+        status = inc.get("status") or "WATCH"
+        agency = inc.get("agency") or "Unknown"
+        title = inc.get("title") or "Incident"
+        lines.append(f"- INCIDENT {inc['number']}: {title} | {agency} | {status} | {location}")
+    return "\n".join(lines)
 
 def _is_summary_marker(l: str) -> bool:
     return SUMMARY_MARKER in l or FULL_SUMMARY_MARKER in l
@@ -556,6 +580,8 @@ WLPD (2019, West Lafayette Police), PUPD (2119, Purdue University Police).
 10-78=need assistance, 10-79=notify coroner. Signal 1=en route, Signal 4=arrived, Code 3=L&S.
 {note_section}
 {mode_section}
+{incident_context}
+
 Radio traffic (format [HH:MM:SS] [TALKGROUP] transcript):
 {block}
 
@@ -564,12 +590,16 @@ When you recognize a local address, business, or landmark in the Lafayette area,
 include that context. If you are unsure about a specific local address or entity, \
 use web_search to look it up silently — do not narrate that you are searching. \
 Use one markdown section per incident with this shape:
-### INCIDENT N: Short incident title
+### INCIDENT 12: Short incident title
 - Agency: agency or agencies
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
 - Location: pure mappable address/place only, or Unknown. Do not add context, explanations, parentheticals, routes, or "near..." guesses here.
 - Details: concise update
 - Action: what remains unresolved or what to watch for
+
+Incident numbers are persistent identifiers. Use only integers, never letters. \
+Reuse an existing incident number when updating the same real-world incident. \
+Do not renumber incidents. For a new incident, use the next unused integer after the highest existing incident number.
 
 Put any local context, landmark explanation, uncertainty, or secondary locations in Details, not Location. \
 Location is used directly as a map link label and query, so keep it clean and exact.
@@ -643,13 +673,20 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
 
     block        = "\n".join(lines)
     note_section = f"\nOperator note: {req.note}\n" if req.note else ""
+    incident_context = incident_board_context(parse_log())
     mode_section = (
         "This is a FULL LOG SUMMARY covering the entire session from the beginning. "
         "Cover every incident — dispatches, responses, closures, and anything still open. "
         "For each incident show its full arc: when it was called, who responded, current status. "
-        "Be comprehensive; do not skip incidents because they resolved."
-    ) if req.full else "This is an INCREMENTAL UPDATE covering only traffic since the last summary."
-    prompt       = PROMPT_TEMPLATE.format(note_section=note_section, mode_section=mode_section, block=block)
+        "Be comprehensive; do not skip incidents because they resolved. "
+        "Reconcile the full log against the existing numbered incident board below."
+    ) if req.full else "This is an INCREMENTAL UPDATE covering only traffic since the last summary. Update existing numbered incidents when applicable."
+    prompt       = PROMPT_TEMPLATE.format(
+        note_section=note_section,
+        mode_section=mode_section,
+        incident_context=incident_context,
+        block=block,
+    )
     max_tokens   = 16000 if req.full else 1024
 
     async def stream_summary() -> AsyncGenerator[str, None]:
