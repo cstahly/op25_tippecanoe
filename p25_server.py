@@ -780,14 +780,19 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         "For each incident show its full arc: when it was called, who responded, current status. "
         "Be comprehensive; do not skip incidents because they resolved. "
         "Reconcile the full log against the existing numbered incident board below."
-    ) if req.full else "This is an INCREMENTAL UPDATE covering only traffic since the last summary. Update existing numbered incidents when applicable."
+    ) if req.full else (
+        "This is an INCREMENTAL UPDATE covering only the radio traffic below. "
+        "Output only incidents directly mentioned or updated by this new traffic, plus genuinely new incidents. "
+        "Do not restate existing incidents unless the new traffic changes their status, location, details, or action. "
+        "Keep Details to no more than two short sentences per incident."
+    )
     prompt = "" if req.full else PROMPT_TEMPLATE.format(
         note_section=note_section,
         mode_section=mode_section,
         incident_context=incident_context,
         block="\n".join(lines),
     )
-    max_tokens   = 16000 if req.full else 4096
+    max_tokens   = 16000 if req.full else 8192
 
     async def stream_summary() -> AsyncGenerator[str, None]:
         if not os.environ.get("ANTHROPIC_API_KEY"):
