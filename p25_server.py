@@ -216,6 +216,10 @@ INCIDENT_HEADING_RE = re.compile(r'^#{2,3}\s+\**(?:INCIDENT\s+(?:(\d+)|[A-Z])\s*
 FIELD_RE = re.compile(r'^(?:-\s+)?\**([^:*]+)\**\s*:\s*(.*)$')
 SUMMARY_HAS_INCIDENT_RE = re.compile(r'^#{2,3}\s+\**INCIDENT\s+(?:\d+|NEW|[A-Z])\s*:', re.IGNORECASE | re.MULTILINE)
 
+def _strip_summary_preamble(text: str) -> str:
+    match = SUMMARY_HAS_INCIDENT_RE.search(text)
+    return text[match.start():].strip() if match else text.strip()
+
 def _agency(tg: str) -> str:
     t = tg.upper()
     if any(x in t for x in ("LPD","WLPD","TCSD","PUPD")): return "police"
@@ -707,6 +711,9 @@ async def _anthropic_text(
             full += chunk
             if on_chunk:
                 await on_chunk(chunk)
+        message = await s.get_final_message()
+        if message.stop_reason == "max_tokens":
+            raise RuntimeError("Claude hit max_tokens before finishing; nothing was written to the log.")
         return full
 
 @app.get("/api/users")
@@ -780,7 +787,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         incident_context=incident_context,
         block="\n".join(lines),
     )
-    max_tokens   = 16000 if req.full else 1024
+    max_tokens   = 16000 if req.full else 4096
 
     async def stream_summary() -> AsyncGenerator[str, None]:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -834,14 +841,29 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 tools=[{"type": "web_search_20260209", "name": "web_search"}],
                 messages=[{"role":"user","content":request_prompt}],
             ) as s:
+                display_started = False
+                display_buffer = ""
                 async for chunk in s.text_stream:
                     full += chunk
-                    yield f"data: {json.dumps({'text':chunk})}\n\n"
+                    if display_started:
+                        yield f"data: {json.dumps({'text':chunk})}\n\n"
+                    else:
+                        display_buffer += chunk
+                        match = SUMMARY_HAS_INCIDENT_RE.search(display_buffer)
+                        if match:
+                            display_started = True
+                            yield f"data: {json.dumps({'text':display_buffer[match.start():]})}\n\n"
+                message = await s.get_final_message()
+                if message.stop_reason == "max_tokens":
+                    msg = "Summary failed: Claude hit max_tokens before finishing, so nothing was written to the log. Try again."
+                    yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
+                    return
         except Exception as exc:
             msg = f"Summary failed: {exc}"
             yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
             return
 
+        full = _strip_summary_preamble(full)
         if not SUMMARY_HAS_INCIDENT_RE.search(full):
             msg = "Summary failed: Claude did not return incident sections, so nothing was written to the log. Try again."
             yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
@@ -851,7 +873,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         marker = FULL_SUMMARY_MARKER if req.full else SUMMARY_MARKER
         with open(LOG_FILE, "a") as f:
             f.write(f"\n{marker} {ts}\n{full.strip()}\n{'='*40}\n\n")
-        yield f"data: {json.dumps({'done':True,'time':ts,'text':full.strip()})}\n\n"
+        yield f"data: {json.dumps({'done':True,'time':ts})}\n\n"
 
     return StreamingResponse(stream_summary(), media_type="text/event-stream",
                              headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
