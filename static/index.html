@@ -145,36 +145,37 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .incident-board { max-width: 980px; margin: 0 auto; display: grid; gap: 8px; }
 .incident-card { background: var(--surface); border: 1px solid var(--border);
                  border-left-width: 4px; border-radius: 8px; overflow: hidden;
-                 display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+                 padding: 10px 12px; display: grid; gap: 8px; }
 .incident-card[data-kind="active"] { border-left-color: var(--summary); }
 .incident-card[data-kind="clear"] { border-left-color: var(--ems); opacity: .82; }
 .incident-card[data-kind="routine"] { border-left-color: var(--other); }
 .incident-card[data-kind="watch"] { border-left-color: var(--police); }
-.incident-card-head { padding: 11px 13px 9px; display: grid; gap: 7px; min-width: 0; }
+.incident-row-main { display: flex; align-items: flex-start; justify-content: space-between;
+                     gap: 12px; min-width: 0; }
 .incident-card-title { font-size: 15px; font-weight: 800; line-height: 1.25; }
-.incident-meta-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.incident-meta-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+                     justify-content: flex-end; flex: 0 1 auto; }
 .incident-pill { border: 1px solid var(--border); border-radius: 999px; color: var(--muted);
                  font-size: 10px; font-weight: 800; letter-spacing: .35px;
                  padding: 3px 7px; text-transform: uppercase; }
 .incident-pill.status-active { border-color: rgba(245,158,11,.55); color: var(--summary); }
 .incident-pill.status-clear { border-color: rgba(34,197,94,.55); color: var(--ems); }
 .incident-pill.status-routine { border-color: rgba(107,114,128,.65); color: var(--muted); }
+.incident-subline { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px;
+                    color: var(--muted); font-size: 12px; min-width: 0; }
 .incident-location { color: var(--text); font-size: 12px; line-height: 1.35; }
 .incident-location a,
 .summary-md a.map-link { color: #93c5fd; text-decoration: none; }
 .incident-location a:hover,
 .summary-md a.map-link:hover { text-decoration: underline; }
 .incident-agency { color: var(--muted); font-size: 12px; }
-.incident-details { padding: 11px 13px 9px; display: grid; gap: 6px;
-                    font-size: 12px; line-height: 1.45; min-width: 0; }
+.incident-age { color: var(--muted); font-family: monospace; font-size: 11px; }
+.incident-details { border-top: 1px solid rgba(148,163,184,.14); padding-top: 8px;
+                    display: grid; gap: 5px; font-size: 12px; line-height: 1.45; min-width: 0; }
 .incident-detail { color: var(--text); }
 .incident-detail::before { content: ""; display: inline-block; width: 5px; height: 5px;
                            border-radius: 50%; background: var(--summary);
                            margin: 0 7px 2px 0; opacity: .8; }
-.incident-foot { grid-column: 1 / -1; border-top: 1px solid var(--border);
-                 display: flex; justify-content: flex-end; gap: 14px;
-                 padding: 7px 13px; color: var(--muted); font-family: monospace;
-                 font-size: 11px; background: rgba(0,0,0,.12); }
 .incident-empty { color: var(--muted); text-align: center; padding: 70px 20px; }
 
 /* ── Summary dock ── */
@@ -245,9 +246,8 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   .view-tab { flex: 1; }
   .filter-tabs { overflow-x: auto; }
   #feed, #incidents { padding: 10px 10px 220px; }
-  .incident-card { grid-template-columns: 1fr; }
-  .incident-details { padding-top: 0; }
-  .incident-foot { justify-content: space-between; }
+  .incident-row-main { display: grid; gap: 7px; }
+  .incident-meta-row { justify-content: flex-start; }
   .summary-dock-inner { grid-template-columns: 1fr; }
   .summary-run { width: 100%; }
 }
@@ -529,21 +529,23 @@ function makeIncidentCard(incident) {
   const details = (incident.details || []).slice(0, 5)
     .map(d => `<div class="incident-detail">${escHtml(d)}</div>`)
     .join('');
+  const updated = escHtml(incident.last_seen || incident.summary_time || '');
+  const updates = `${Number(incident.updates || 1)} update${Number(incident.updates || 1) === 1 ? '' : 's'}`;
   card.innerHTML = `
-    <div class="incident-card-head">
+    <div class="incident-row-main">
       <div class="incident-card-title">${escHtml(title)}</div>
       <div class="incident-meta-row">
         <span class="incident-pill ${statusClass}">${escHtml(incident.status || 'WATCH')}</span>
         <span class="incident-pill">${escHtml(incident.agency || 'Unknown')}</span>
       </div>
-      ${incident.location ? `<div class="incident-location">${mapLocationHtml(incident.location)}</div>` : ''}
-      <div class="incident-agency">${escHtml(incident.agency || 'Unknown agency')}</div>
     </div>
-    <div class="incident-details">${details || '<div class="incident-detail">Awaiting a cleaner summary update.</div>'}</div>
-    <div class="incident-foot">
-      <span>updated ${escHtml(incident.last_seen || incident.summary_time || '')}</span>
-      <span>${Number(incident.updates || 1)} update${Number(incident.updates || 1) === 1 ? '' : 's'}</span>
-    </div>`;
+    <div class="incident-subline">
+      ${incident.location ? `<div class="incident-location">${mapLocationHtml(incident.location)}</div>` : ''}
+      <span class="incident-agency">${escHtml(incident.agency || 'Unknown agency')}</span>
+      <span class="incident-age">updated ${updated}</span>
+      <span class="incident-age">${escHtml(updates)}</span>
+    </div>
+    <div class="incident-details">${details || '<div class="incident-detail">Awaiting a cleaner summary update.</div>'}</div>`;
   return card;
 }
 
