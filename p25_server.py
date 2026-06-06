@@ -4,7 +4,7 @@ P25 web app backend.
   uvicorn p25_server:app --host 0.0.0.0 --port 8765
 Auth: P25_USER / P25_PASSWORD env vars (defaults: p25 / scanner)
 """
-import base64, hashlib, hmac, os, re, json, asyncio, secrets, time
+import base64, hashlib, hmac, os, re, json, asyncio, secrets, time, sqlite3
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -19,6 +19,7 @@ from pydantic import BaseModel
 LOG_FILE    = Path.home() / "op25_tippecanoe/p25_log.txt"
 STATIC      = Path(__file__).parent / "static"
 AUDIO_FIFO  = "/tmp/p25_audio.fifo"
+DB_FILE     = Path.home() / "op25_tippecanoe/p25_state.db"
 
 USERNAME = os.environ.get("P25_USER", "p25")
 PASSWORD = os.environ.get("P25_PASSWORD", "scanner")
@@ -59,6 +60,7 @@ async def _audio_broadcast_loop():
 
 @app.on_event("startup")
 async def _startup():
+    ensure_state_ready()
     asyncio.create_task(_audio_broadcast_loop())
 
 def _b64url_encode(data: bytes) -> str:
@@ -456,6 +458,22 @@ def incident_board_context(entries: list[dict]) -> str:
         lines.append(f"- INCIDENT {inc['number']}: {title} | {agency} | {status} | {location}")
     return "\n".join(lines)
 
+def incident_board_context_from_incidents(incidents: list[dict]) -> str:
+    numbered = [inc for inc in incidents if inc.get("number")]
+    if not numbered:
+        return "Existing numbered incident board: none yet. Start numbering at INCIDENT 1."
+    numbered.sort(key=lambda inc: int(inc["number"]))
+    lines = [
+        "Existing numbered incident board. Reuse these numbers for the same real-world incidents:"
+    ]
+    for inc in numbered:
+        location = inc.get("location") or "Unknown"
+        status = inc.get("status") or "WATCH"
+        agency = inc.get("agency") or "Unknown"
+        title = inc.get("title") or "Incident"
+        lines.append(f"- INCIDENT {inc['number']}: {title} | {agency} | {status} | {location}")
+    return "\n".join(lines)
+
 def _is_summary_marker(l: str) -> bool:
     return SUMMARY_MARKER in l or FULL_SUMMARY_MARKER in l
 
@@ -490,6 +508,191 @@ def read_full_log() -> list[str]:
             result.append(l)
     return result
 
+# ── Durable state ────────────────────────────────────────────────────────────
+
+def _db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_state_db() -> None:
+    with _db() as conn:
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS transmissions (
+            id INTEGER PRIMARY KEY,
+            time TEXT NOT NULL,
+            talkgroup TEXT NOT NULL,
+            agency TEXT NOT NULL,
+            text TEXT NOT NULL,
+            raw_line TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS incident_state (
+            number INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            agency TEXT NOT NULL,
+            status TEXT NOT NULL,
+            status_kind TEXT NOT NULL,
+            location TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            action TEXT NOT NULL,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS summary_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            from_tx_id INTEGER NOT NULL,
+            to_tx_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            output TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL DEFAULT ''
+        );
+        """)
+
+def _get_state(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+def _set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO app_state(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+def _last_valid_summary_tx_id_from_log() -> int:
+    if not LOG_FILE.exists():
+        return 0
+    tx_count = 0
+    last_summary_tx = 0
+    lines = LOG_FILE.read_text(errors="replace").splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if TX_RE.match(line):
+            tx_count += 1
+            i += 1
+            continue
+        if _is_summary_marker(line):
+            j = i + 1
+            while j < len(lines) and lines[j] != SUMMARY_END:
+                j += 1
+            if j < len(lines) and lines[j] == SUMMARY_END:
+                last_summary_tx = tx_count
+                i = j + 1
+                continue
+        i += 1
+    return last_summary_tx
+
+def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
+    rows = []
+    if LOG_FILE.exists():
+        for line in LOG_FILE.read_text(errors="replace").splitlines():
+            m = TX_RE.match(line)
+            if not m:
+                continue
+            tx_id = len(rows) + 1
+            tg = m.group(2)
+            rows.append((tx_id, m.group(1), tg, _agency(tg), m.group(3), line))
+    conn.execute("DELETE FROM transmissions")
+    conn.executemany(
+        "INSERT INTO transmissions(id, time, talkgroup, agency, text, raw_line) VALUES(?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    return len(rows)
+
+def incident_rows_from_db(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM incident_state ORDER BY "
+        "CASE status_kind WHEN 'active' THEN 0 WHEN 'watch' THEN 1 WHEN 'routine' THEN 2 WHEN 'clear' THEN 3 ELSE 1 END, "
+        "last_seen DESC"
+    ).fetchall()
+    incidents = []
+    for row in rows:
+        details = json.loads(row["details_json"] or "[]")
+        incidents.append({
+            "id": f"incident-{row['number']}",
+            "number": row["number"],
+            "title": row["title"],
+            "agency": row["agency"],
+            "status": row["status"],
+            "status_kind": row["status_kind"],
+            "location": row["location"],
+            "details": details,
+            "action": row["action"],
+            "first_seen": row["first_seen"],
+            "last_seen": row["last_seen"],
+            "summary_time": row["last_seen"],
+            "updates": 1,
+        })
+    return incidents
+
+def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str) -> None:
+    number = int(inc["number"])
+    details = inc.get("details") or []
+    if isinstance(details, str):
+        details = [details]
+    title = str(inc.get("title") or "Incident").strip()
+    status = str(inc.get("status") or "WATCH").strip()
+    blob = "\n".join([title, status, *(str(d) for d in details)])
+    row = conn.execute("SELECT first_seen FROM incident_state WHERE number = ?", (number,)).fetchone()
+    first_seen = row["first_seen"] if row else now
+    conn.execute(
+        """
+        INSERT INTO incident_state
+            (number, title, agency, status, status_kind, location, details_json, action, first_seen, last_seen, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(number) DO UPDATE SET
+            title = excluded.title,
+            agency = excluded.agency,
+            status = excluded.status,
+            status_kind = excluded.status_kind,
+            location = excluded.location,
+            details_json = excluded.details_json,
+            action = excluded.action,
+            last_seen = excluded.last_seen,
+            updated_at = excluded.updated_at
+        """,
+        (
+            number,
+            title,
+            str(inc.get("agency") or "Unknown").strip(),
+            status,
+            _status_kind(status, blob),
+            str(inc.get("location") or "Unknown").strip(),
+            json.dumps([str(d).strip() for d in details if str(d).strip()][:8]),
+            str(inc.get("action") or "").strip(),
+            first_seen,
+            now,
+            now,
+        ),
+    )
+
+def seed_incident_state(conn: sqlite3.Connection) -> None:
+    existing = conn.execute("SELECT COUNT(*) AS c FROM incident_state").fetchone()["c"]
+    if existing:
+        return
+    for inc in derive_incidents(parse_log()):
+        if not inc.get("number"):
+            continue
+        _upsert_incident(conn, inc, inc.get("last_seen") or inc.get("summary_time") or "")
+
+def ensure_state_ready() -> None:
+    init_state_db()
+    with _db() as conn:
+        tx_count = sync_transmissions_from_log(conn)
+        seed_incident_state(conn)
+        if not _get_state(conn, "last_summarized_tx_id"):
+            _set_state(conn, "last_summarized_tx_id", str(_last_valid_summary_tx_id_from_log()))
+        _set_state(conn, "last_tx_id", str(tx_count))
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/entries", dependencies=[Depends(require_auth)])
@@ -498,12 +701,15 @@ def get_entries():
 
 @app.get("/api/state", dependencies=[Depends(require_auth)])
 def get_state():
+    ensure_state_ready()
     stat = LOG_FILE.stat() if LOG_FILE.exists() else None
     entries = parse_log()
+    with _db() as conn:
+        incidents = incident_rows_from_db(conn)
     return JSONResponse({
         "entries": entries,
         "entries_latest": list(reversed(entries)),
-        "incidents": derive_incidents(entries),
+        "incidents": incidents or derive_incidents(entries),
         "log_size": stat.st_size if stat else 0,
         "log_mtime": stat.st_mtime if stat else 0,
     }, headers={"Cache-Control": "no-store"})
@@ -667,6 +873,41 @@ Chunk summaries:
 {block}
 """
 
+INCREMENTAL_JSON_TEMPLATE = """\
+You update a live incident board for Tippecanoe County public safety radio traffic.
+
+Existing incident board:
+{incident_context}
+
+New transmissions since the last successful summary:
+{block}
+
+Return JSON only, with no markdown and no preamble. The JSON shape is:
+{{
+  "incidents": [
+    {{
+      "number": 12,
+      "title": "Short incident title",
+      "agency": "agency or agencies",
+      "status": "ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING",
+      "location": "pure mappable address/place only, or Unknown",
+      "details": ["one short fact from the new transmissions", "optional second short fact"],
+      "action": "what remains unresolved or what to watch for"
+    }}
+  ]
+}}
+
+Rules:
+- Include only incidents directly mentioned or updated by the new transmissions.
+- Reuse an existing incident number for the same real-world incident.
+- For a new incident, assign the next unused integer after the highest existing incident number.
+- Use only integer incident numbers, never letters.
+- Do not include administrative traffic unless it changes an incident.
+- Location must be a pure mappable address/place only, or Unknown. Put uncertainty and context in details.
+- Keep each incident concise: at most two details.
+- If there are no incident updates, return {{"incidents":[]}}.
+"""
+
 class SummarizeReq(BaseModel):
     note: str = ""
     full: bool = False
@@ -716,6 +957,66 @@ async def _anthropic_text(
             raise RuntimeError("Claude hit max_tokens before finishing; nothing was written to the log.")
         return full
 
+def _parse_json_object(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
+        cleaned = re.sub(r'\s*```$', '', cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(cleaned[start:end + 1])
+        raise
+
+def _validate_incident_updates(payload: dict) -> list[dict]:
+    incidents = payload.get("incidents")
+    if not isinstance(incidents, list):
+        raise ValueError("Claude JSON missing incidents list")
+    valid = []
+    for inc in incidents:
+        if not isinstance(inc, dict):
+            raise ValueError("Incident update is not an object")
+        number = inc.get("number")
+        if not isinstance(number, int):
+            raise ValueError("Incident number must be an integer")
+        title = str(inc.get("title") or "").strip()
+        if not title:
+            raise ValueError(f"Incident {number} missing title")
+        details = inc.get("details") or []
+        if isinstance(details, str):
+            details = [details]
+        if not isinstance(details, list):
+            raise ValueError(f"Incident {number} details must be a list")
+        valid.append({
+            "number": number,
+            "title": title,
+            "agency": str(inc.get("agency") or "Unknown").strip(),
+            "status": str(inc.get("status") or "WATCH").strip(),
+            "location": str(inc.get("location") or "Unknown").strip(),
+            "details": [str(d).strip() for d in details if str(d).strip()][:2],
+            "action": str(inc.get("action") or "").strip(),
+        })
+    return valid
+
+def _incident_updates_markdown(updates: list[dict]) -> str:
+    if not updates:
+        return "No incident updates."
+    blocks = []
+    for inc in updates:
+        details = " ".join(inc.get("details") or []) or "Updated by recent radio traffic."
+        blocks.append(
+            f"### INCIDENT {inc['number']}: {inc['title']}\n"
+            f"- Agency: {inc.get('agency') or 'Unknown'}\n"
+            f"- Status: {inc.get('status') or 'WATCH'}\n"
+            f"- Location: {inc.get('location') or 'Unknown'}\n"
+            f"- Details: {details}\n"
+            f"- Action: {inc.get('action') or 'None'}"
+        )
+    return "\n\n---\n\n".join(blocks)
+
 @app.get("/api/users")
 def list_users(auth: dict = Depends(require_auth)):
     if auth["username"] != USERNAME:
@@ -749,6 +1050,8 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         if auth["username"] != USERNAME:
             raise HTTPException(403, detail="Only the primary user can run a full summary")
         lines = read_full_log()
+        tx_rows = []
+        from_tx_id = to_tx_id = 0
     else:
         try:
             check_summary_rate_limit(auth)
@@ -764,13 +1067,81 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 media_type="text/event-stream",
                 headers={**(exc.headers or {}), "Cache-Control":"no-cache","X-Accel-Buffering":"no"},
             )
-        lines = read_since_last_summary()
+        ensure_state_ready()
+        with _db() as conn:
+            from_tx_id = int(_get_state(conn, "last_summarized_tx_id", "0") or "0")
+            tx_rows = conn.execute(
+                "SELECT * FROM transmissions WHERE id > ? ORDER BY id",
+                (from_tx_id,),
+            ).fetchall()
+            to_tx_id = tx_rows[-1]["id"] if tx_rows else from_tx_id
+            lines = [row["raw_line"] for row in tx_rows]
 
     async def stream_empty():
         yield f"data: {json.dumps({'done':True,'text':'No new traffic since last summary.'})}\n\n"
 
     if not lines:
         return StreamingResponse(stream_empty(), media_type="text/event-stream")
+
+    if not req.full:
+        async def stream_incremental_summary() -> AsyncGenerator[str, None]:
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                msg = "ANTHROPIC_API_KEY is not set for p25-server.service."
+                yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
+                return
+
+            created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with _db() as conn:
+                current_incidents = incident_rows_from_db(conn)
+                incident_context = incident_board_context_from_incidents(current_incidents)
+                cur = conn.execute(
+                    "INSERT INTO summary_jobs(mode, from_tx_id, to_tx_id, status, created_at) VALUES(?, ?, ?, ?, ?)",
+                    ("incremental", from_tx_id + 1, to_tx_id, "running", created_at),
+                )
+                job_id = cur.lastrowid
+
+            prompt = INCREMENTAL_JSON_TEMPLATE.format(
+                incident_context=incident_context,
+                block="\n".join(lines),
+            )
+            try:
+                client = anthropic.AsyncAnthropic()
+                message = await client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=4096,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                if message.stop_reason == "max_tokens":
+                    raise RuntimeError("Claude hit max_tokens before finishing; cursor was not advanced.")
+                raw = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
+                updates = _validate_incident_updates(_parse_json_object(raw))
+                markdown = _incident_updates_markdown(updates)
+            except Exception as exc:
+                completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with _db() as conn:
+                    conn.execute(
+                        "UPDATE summary_jobs SET status = ?, error = ?, completed_at = ? WHERE id = ?",
+                        ("failed", str(exc), completed_at, job_id),
+                    )
+                yield f"data: {json.dumps({'error':f'Summary failed: {exc}','done':True})}\n\n"
+                return
+
+            completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with _db() as conn:
+                for inc in updates:
+                    _upsert_incident(conn, inc, completed_at)
+                _set_state(conn, "last_summarized_tx_id", str(to_tx_id))
+                conn.execute(
+                    "UPDATE summary_jobs SET status = ?, output = ?, completed_at = ? WHERE id = ?",
+                    ("succeeded", markdown, completed_at, job_id),
+                )
+            with open(LOG_FILE, "a") as f:
+                f.write(f"\n{SUMMARY_MARKER} {completed_at}\n{markdown}\n{'='*40}\n\n")
+            yield f"data: {json.dumps({'text':markdown})}\n\n"
+            yield f"data: {json.dumps({'done':True,'time':completed_at})}\n\n"
+
+        return StreamingResponse(stream_incremental_summary(), media_type="text/event-stream",
+                                 headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
     note_section = f"\nOperator note: {req.note}\n" if req.note else ""
     incident_context = incident_board_context(parse_log())
