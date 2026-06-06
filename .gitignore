@@ -4,10 +4,10 @@ __pycache__/
 
 # Live radio output and decoder noise.
 p25_log.txt
+p25_log.backup-*.txt
 stderr.log
 
 # Local credentials.
 .env
 *.env
 .p25_password
-

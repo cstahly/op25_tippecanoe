@@ -607,6 +607,52 @@ Location is used directly as a map link label and query, so keep it clean and ex
 Use stable incident titles when an older incident is still being updated. \
 Note any unresolved situations. Be direct and concise."""
 
+FULL_CHUNK_TEMPLATE = """\
+You are reviewing one chunk of Tippecanoe County public safety radio traffic.
+
+{incident_context}
+
+This is chunk {chunk_num} of {chunk_count}. Extract incident facts from this chunk only. \
+Preserve existing incident numbers when the traffic clearly belongs to one. For new incidents, \
+label them NEW in this chunk summary; do not assign final numbers here.
+
+Radio traffic:
+{block}
+
+Return concise markdown sections:
+### INCIDENT 12 or NEW: Short title
+- Agency:
+- Status:
+- Location: pure mappable address/place only, or Unknown
+- Details:
+- Action:
+"""
+
+FULL_CONSOLIDATE_TEMPLATE = """\
+You are creating the final full-session incident summary for Tippecanoe County public safety radio traffic.
+
+{incident_context}
+
+Consolidate the chunk summaries below into one current incident list. Incident numbers are persistent \
+identifiers. Use only integers, never letters. Reuse existing incident numbers for the same real-world \
+incident. Do not renumber incidents. Assign new incidents the next unused integer after the highest \
+existing incident number.
+
+Location must be a pure mappable address/place only, or Unknown. Put context, uncertainty, and secondary \
+locations in Details, not Location.
+
+Use one markdown section per incident:
+### INCIDENT 12: Short incident title
+- Agency: agency or agencies
+- Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
+- Location: pure mappable address/place only, or Unknown
+- Details: concise full-arc update
+- Action: what remains unresolved or what to watch for
+
+Chunk summaries:
+{block}
+"""
+
 class SummarizeReq(BaseModel):
     note: str = ""
     full: bool = False
@@ -614,6 +660,44 @@ class SummarizeReq(BaseModel):
 class ShareLoginReq(BaseModel):
     ttl_seconds: int = DEFAULT_SHARE_TOKEN_SECONDS
     for_username: str = ""
+
+def _chunk_lines(lines: list[str], max_chars: int = 80000) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for line in lines:
+        line_size = len(line) + 1
+        if current and size + line_size > max_chars:
+            chunks.append(current)
+            current = []
+            size = 0
+        current.append(line)
+        size += line_size
+    if current:
+        chunks.append(current)
+    return chunks
+
+async def _anthropic_text(
+    client: anthropic.AsyncAnthropic,
+    prompt: str,
+    max_tokens: int,
+    use_search: bool,
+    on_chunk=None,
+) -> str:
+    kwargs = {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": max_tokens,
+        "messages": [{"role":"user","content":prompt}],
+    }
+    if use_search:
+        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search"}]
+    async with client.messages.stream(**kwargs) as s:
+        full = ""
+        async for chunk in s.text_stream:
+            full += chunk
+            if on_chunk:
+                await on_chunk(chunk)
+        return full
 
 @app.get("/api/users")
 def list_users(auth: dict = Depends(require_auth)):
@@ -671,7 +755,6 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
     if not lines:
         return StreamingResponse(stream_empty(), media_type="text/event-stream")
 
-    block        = "\n".join(lines)
     note_section = f"\nOperator note: {req.note}\n" if req.note else ""
     incident_context = incident_board_context(parse_log())
     mode_section = (
@@ -681,11 +764,11 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         "Be comprehensive; do not skip incidents because they resolved. "
         "Reconcile the full log against the existing numbered incident board below."
     ) if req.full else "This is an INCREMENTAL UPDATE covering only traffic since the last summary. Update existing numbered incidents when applicable."
-    prompt       = PROMPT_TEMPLATE.format(
+    prompt = "" if req.full else PROMPT_TEMPLATE.format(
         note_section=note_section,
         mode_section=mode_section,
         incident_context=incident_context,
-        block=block,
+        block="\n".join(lines),
     )
     max_tokens   = 16000 if req.full else 1024
 
@@ -698,6 +781,42 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         client = anthropic.AsyncAnthropic()
         full   = ""
         try:
+            if req.full:
+                chunks = _chunk_lines(lines)
+                partials = []
+                for idx, chunk_lines in enumerate(chunks, start=1):
+                    notice = f"\n\n[processing full-summary chunk {idx}/{len(chunks)}]\n"
+                    yield f"data: {json.dumps({'text':notice})}\n\n"
+                    chunk_prompt = FULL_CHUNK_TEMPLATE.format(
+                        incident_context=incident_context,
+                        chunk_num=idx,
+                        chunk_count=len(chunks),
+                        block="\n".join(chunk_lines),
+                    )
+                    chunk_task = asyncio.create_task(
+                        _anthropic_text(client, chunk_prompt, max_tokens=3000, use_search=False)
+                    )
+                    while not chunk_task.done():
+                        await asyncio.sleep(15)
+                        yield ": keepalive\n\n"
+                    partial = chunk_task.result()
+                    partials.append(f"## Chunk {idx}/{len(chunks)}\n{partial.strip()}")
+                    if idx < len(chunks):
+                        yield f"data: {json.dumps({'text':'[waiting for rate-limit window]\\n'})}\n\n"
+                        for _ in range(5):
+                            await asyncio.sleep(13)
+                            yield ": keepalive\n\n"
+
+                yield f"data: {json.dumps({'text':'\\n[consolidating full summary]\\n'})}\n\n"
+                if len(chunks) > 1:
+                    for _ in range(5):
+                        await asyncio.sleep(13)
+                        yield ": keepalive\n\n"
+                prompt = FULL_CONSOLIDATE_TEMPLATE.format(
+                    incident_context=incident_context,
+                    block="\n\n".join(partials),
+                )
+
             async with client.messages.stream(
                 model="claude-sonnet-4-6",
                 max_tokens=max_tokens,
