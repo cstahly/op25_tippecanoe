@@ -214,6 +214,7 @@ SUMMARY_END         = '=' * 40
 INCIDENT_HEADING_RE = re.compile(r'^#{2,3}\s+\**(?:INCIDENT\s+(?:(\d+)|[A-Z])\s*:\s*)?(.+?)\**\s*$',
                                  re.IGNORECASE)
 FIELD_RE = re.compile(r'^(?:-\s+)?\**([^:*]+)\**\s*:\s*(.*)$')
+SUMMARY_HAS_INCIDENT_RE = re.compile(r'^#{2,3}\s+\**INCIDENT\s+(?:\d+|NEW|[A-Z])\s*:', re.IGNORECASE | re.MULTILINE)
 
 def _agency(tg: str) -> str:
     t = tg.upper()
@@ -458,11 +459,15 @@ def read_since_last_summary() -> list[str]:
     if not LOG_FILE.exists():
         return []
     lines = LOG_FILE.read_text(errors="replace").splitlines()
-    last = -1
+    start = 0
     for i, l in enumerate(lines):
         if _is_summary_marker(l):
-            last = i
-    return [l for l in lines[last+1:] if l.strip()]
+            start = i + 1
+            while start < len(lines) and lines[start] != SUMMARY_END:
+                start += 1
+            if start < len(lines) and lines[start] == SUMMARY_END:
+                start += 1
+    return [l for l in lines[start:] if l.strip()]
 
 def read_full_log() -> list[str]:
     """All transcript lines, stripping existing summary blocks."""
@@ -589,6 +594,8 @@ Summarize what has been happening. Group by incident. Translate codes. \
 When you recognize a local address, business, or landmark in the Lafayette area, \
 include that context. If you are unsure about a specific local address or entity, \
 use web_search to look it up silently — do not narrate that you are searching. \
+Output only the final incident sections. Do not include preamble, analysis narration, search narration, \
+or phrases like "I'll analyze", "I'll work through", "let me", or "now I have enough". \
 Use one markdown section per incident with this shape:
 ### INCIDENT 12: Short incident title
 - Agency: agency or agencies
@@ -615,6 +622,7 @@ You are reviewing one chunk of Tippecanoe County public safety radio traffic.
 This is chunk {chunk_num} of {chunk_count}. Extract incident facts from this chunk only. \
 Preserve existing incident numbers when the traffic clearly belongs to one. For new incidents, \
 label them NEW in this chunk summary; do not assign final numbers here.
+Output only incident sections. Do not include preamble, analysis narration, or search narration.
 
 Radio traffic:
 {block}
@@ -640,6 +648,8 @@ existing incident number.
 
 Location must be a pure mappable address/place only, or Unknown. Put context, uncertainty, and secondary \
 locations in Details, not Location.
+Output only the final incident sections. Do not include preamble, analysis narration, search narration, \
+or phrases like "I'll analyze", "I'll work through", "let me", or "now I have enough".
 
 Use one markdown section per incident:
 ### INCIDENT 12: Short incident title
@@ -829,6 +839,11 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                     yield f"data: {json.dumps({'text':chunk})}\n\n"
         except Exception as exc:
             msg = f"Summary failed: {exc}"
+            yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
+            return
+
+        if not SUMMARY_HAS_INCIDENT_RE.search(full):
+            msg = "Summary failed: Claude did not return incident sections, so nothing was written to the log. Try again."
             yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
             return
 
