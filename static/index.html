@@ -847,12 +847,20 @@ function makeTxCard(entry) {
     <div class="tx-card-inner">
       <div class="tx-meta">
         <span class="tg-badge" data-agency="${escHtml(entry.agency || 'other')}">${escHtml(entry.talkgroup || 'Unknown')}</span>
-        ${entry.wav_file ? `<button class="tx-play-btn" title="Play recording" data-wav="${escAttr(entry.wav_file)}">▶</button>` : ''}
+        ${entry.wav_file ? `<button class="tx-play-btn" title="Play recording">▶</button>` : ''}
         <span class="tx-time">${escHtml(entry.time || '')}</span>
       </div>
       <div class="tx-text${long ? ' truncated' : ''}">${escHtml(text)}</div>
       ${long ? '<div class="tx-expand">tap to expand ↓</div>' : ''}
     </div>`;
+  if (entry.wav_file) {
+    const wavFile = entry.wav_file;
+    const playBtn = card.querySelector('.tx-play-btn');
+    playBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      playClip(wavFile, playBtn);
+    });
+  }
   return card;
 }
 
@@ -1151,8 +1159,6 @@ document.querySelectorAll('.filter-tab[data-trunk]').forEach(btn => {
 });
 
 document.getElementById('feed').addEventListener('click', e => {
-  const playBtn = e.target.closest('.tx-play-btn');
-  if (playBtn) { playClip(playBtn.dataset.wav, playBtn); return; }
   const card = e.target.closest('.tx-card.has-more');
   if (!card) return;
   card.classList.toggle('expanded');
