@@ -462,16 +462,32 @@ def incident_board_context_from_incidents(incidents: list[dict]) -> str:
     numbered = [inc for inc in incidents if inc.get("number")]
     if not numbered:
         return "Existing numbered incident board: none yet. Start numbering at INCIDENT 1."
-    numbered.sort(key=lambda inc: int(inc["number"]))
-    lines = [
-        "Existing numbered incident board. Reuse these numbers for the same real-world incidents:"
+
+    def sort_key(inc: dict):
+        kind = inc.get("status_kind", "watch")
+        priority = 0 if kind in ("active", "watch") else 1
+        return (priority, str(inc.get("last_seen", "")), int(inc["number"]))
+
+    open_items = [inc for inc in numbered if inc.get("status_kind") != "clear"]
+    recent_closed = [
+        inc for inc in numbered
+        if inc.get("status_kind") == "clear"
     ]
-    for inc in numbered:
+    open_items.sort(key=sort_key, reverse=True)
+    recent_closed.sort(key=lambda inc: (str(inc.get("last_seen", "")), int(inc["number"])), reverse=True)
+
+    selected = open_items[:60] + recent_closed[:10]
+    selected.sort(key=lambda inc: int(inc["number"]))
+
+    lines = [
+        "Existing incident board subset. Reuse these numbers for matching. "
+        f"Showing {len(selected)} of {len(numbered)} incidents: most recent open items plus recently cleared items."
+    ]
+    for inc in selected:
         location = inc.get("location") or "Unknown"
         status = inc.get("status") or "WATCH"
-        agency = inc.get("agency") or "Unknown"
         title = inc.get("title") or "Incident"
-        lines.append(f"- INCIDENT {inc['number']}: {title} | {agency} | {status} | {location}")
+        lines.append(f"{inc['number']}. {status} | {title} | {location}")
     return "\n".join(lines)
 
 def _is_summary_marker(l: str) -> bool:
