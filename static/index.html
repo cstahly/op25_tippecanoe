@@ -121,6 +121,9 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 
 .tx-card-inner { padding: 10px 12px; display: flex; flex-direction: column; gap: 5px; }
 .tx-meta { display: flex; align-items: center; gap: 8px; }
+.tx-play-btn { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 14px; padding: 0 2px; line-height: 1; transition: color 0.15s; }
+.tx-play-btn:hover { color: var(--text); }
+.tx-play-btn.playing { color: var(--police); }
 .tg-badge { font-size: 11px; font-weight: 600; border-radius: 4px; padding: 2px 7px; }
 .tg-badge[data-agency="police"] { background: rgba(59,130,246,.2);  color: var(--police); }
 .tg-badge[data-agency="fire"]   { background: rgba(239,68,68,.2);   color: var(--fire);   }
@@ -455,14 +458,8 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   <div id="map-view">
     <div id="leaflet-map"></div>
     <div class="map-filter-bar">
-      <button class="map-filter-btn active" data-mf-status="active">Active</button>
-      <button class="map-filter-btn" data-mf-status="open">Open</button>
+      <button class="map-filter-btn active" data-mf-status="live">Live</button>
       <button class="map-filter-btn" data-mf-status="all">All</button>
-      <div class="map-filter-sep"></div>
-      <button class="map-filter-btn active" data-mf-hours="">Live</button>
-      <button class="map-filter-btn" data-mf-hours="4">4h</button>
-      <button class="map-filter-btn" data-mf-hours="12">12h</button>
-      <button class="map-filter-btn" data-mf-hours="24">24h</button>
     </div>
     <div class="map-status-bar" id="map-status-bar"></div>
   </div>
@@ -500,6 +497,10 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
       <div class="incident-modal-row">
         <div class="incident-modal-label">Action</div>
         <div class="incident-modal-value" id="incident-modal-action"></div>
+      </div>
+      <div class="incident-modal-row" id="incident-modal-times-row" style="display:none">
+        <div class="incident-modal-label">Timeline</div>
+        <div class="incident-modal-value" id="incident-modal-times"></div>
       </div>
       <div class="incident-modal-row" id="incident-modal-log-row" style="display:none">
         <div class="incident-modal-label">Chat</div>
@@ -542,12 +543,13 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   <div class="summary-dock-inner">
     <textarea class="summary-note" id="summary-note" rows="1" placeholder="Optional note for summary"></textarea>
     <div class="summary-btn-group">
-      <button class="summary-run" id="summary-all" style="display:none;opacity:.7" title="Summarize entire log">All</button>
       <div class="summary-split">
         <button class="summary-run" id="summary-run">Generate Summary</button>
         <button class="summary-run summary-caret" id="summary-caret" title="More options" style="display:none">▾</button>
         <div class="summary-dropdown-menu" id="summary-dropdown-menu">
-          <button class="summary-dropdown-item" id="summary-expensive">Expensive Summary</button>
+          <button class="summary-dropdown-item" id="summary-fast">Fast (auto quality)</button>
+          <button class="summary-dropdown-item" id="summary-expensive">Expensive</button>
+          <button class="summary-dropdown-item" id="summary-all">All</button>
         </div>
       </div>
     </div>
@@ -850,6 +852,7 @@ function makeTxCard(entry) {
     <div class="tx-card-inner">
       <div class="tx-meta">
         <span class="tg-badge" data-agency="${escHtml(entry.agency || 'other')}">${escHtml(entry.talkgroup || 'Unknown')}</span>
+        ${entry.wav_file ? `<button class="tx-play-btn" title="Play recording" data-wav="${escAttr(entry.wav_file)}">▶</button>` : ''}
         <span class="tx-time">${escHtml(entry.time || '')}</span>
       </div>
       <div class="tx-text${long ? ' truncated' : ''}">${escHtml(text)}</div>
@@ -903,6 +906,17 @@ function openIncidentModal(number) {
   document.getElementById('incident-modal-location').innerHTML = incident.location ? mapLocationHtml(incident.location) : 'Unknown';
   document.getElementById('incident-modal-agency').textContent = incident.agency || 'Unknown';
   document.getElementById('incident-modal-action').textContent = incident.action || 'None';
+  const timesRow = document.getElementById('incident-modal-times-row');
+  const timesEl = document.getElementById('incident-modal-times');
+  if (incident.first_seen || incident.last_seen) {
+    const parts = [];
+    if (incident.first_seen) parts.push(`First: ${incident.first_seen}`);
+    if (incident.last_seen)  parts.push(`Last: ${incident.last_seen}`);
+    timesEl.textContent = parts.join('  ·  ');
+    timesRow.style.display = '';
+  } else {
+    timesRow.style.display = 'none';
+  }
   document.getElementById('incident-modal-details').innerHTML = (incident.details || [])
     .map(d => `<div class="incident-detail">${escHtml(d)}</div>`)
     .join('') || '<div class="incident-detail">No details recorded.</div>';
@@ -1305,7 +1319,7 @@ summaryRun.onclick = async () => {
   }
 };
 
-// ── Summary dropdown (caret + expensive) ─────────────────────────────────────
+// ── Summary dropdown ──────────────────────────────────────────────────────────
 const summaryCaretBtn = document.getElementById('summary-caret');
 const summaryDropdown = document.getElementById('summary-dropdown-menu');
 
@@ -1316,7 +1330,7 @@ summaryCaretBtn.onclick = (e) => {
 
 document.addEventListener('click', () => summaryDropdown.classList.remove('open'));
 
-document.getElementById('summary-expensive').onclick = async () => {
+async function runDropdownSummary(params) {
   summaryDropdown.classList.remove('open');
   summaryRun.disabled = true;
   summaryCaretBtn.disabled = true;
@@ -1326,79 +1340,18 @@ document.getElementById('summary-expensive').onclick = async () => {
   summaryOut.style.display = 'none';
   summaryOut.textContent = '';
 
-  try {
-    const resp = await fetch('/api/summarize', {
-      method: 'POST',
-      headers: { ...authHeader(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ note: summaryNote.value.trim(), expensive: true }),
-    });
-
-    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
-
-    const reader = resp.body.getReader();
-    const dec    = new TextDecoder();
-    let   buf    = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const parts = buf.split('\n\n');
-      buf = parts.pop();
-      for (const part of parts) {
-        const line = part.trim();
-        if (!line.startsWith('data:')) continue;
-        const payload = JSON.parse(line.slice(5).trim());
-        if (payload.error) {
-          summaryRun.classList.remove('running');
-          summaryOut.classList.add('error');
-          summaryOut.style.display = 'block';
-          summaryOut.textContent = payload.error;
-          summaryRun.textContent = 'Generate Summary';
-          summaryRun.disabled = false;
-          summaryCaretBtn.disabled = false;
-          return;
-        }
-        if (payload.done) {
-          await syncEntries();
-          summaryNote.value = '';
-          summaryNote.style.height = 'auto';
-          summaryRun.classList.remove('running');
-          summaryRun.textContent = 'Done';
-          setTimeout(() => {
-            summaryRun.textContent = 'Generate Summary';
-            summaryRun.disabled = false;
-            summaryCaretBtn.disabled = false;
-          }, 1200);
-        }
-      }
-    }
-  } catch (e) {
+  const reset = () => {
     summaryRun.classList.remove('running');
-    summaryOut.classList.add('error');
-    summaryOut.style.display = 'block';
-    summaryOut.textContent = 'Error: ' + e.message;
     summaryRun.textContent = 'Generate Summary';
     summaryRun.disabled = false;
     summaryCaretBtn.disabled = false;
-  }
-};
-
-document.getElementById('summary-all').onclick = async () => {
-  const allBtn = document.getElementById('summary-all');
-  allBtn.disabled = true;
-  summaryRun.disabled = true;
-  summaryRun.classList.add('running');
-  summaryRun.textContent = 'Running';
-  summaryOut.classList.remove('error');
-  summaryOut.style.display = 'none';
-  summaryOut.textContent = '';
+  };
 
   try {
     const resp = await fetch('/api/summarize', {
       method: 'POST',
       headers: { ...authHeader(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ note: summaryNote.value.trim(), full: true }),
+      body: JSON.stringify({ note: summaryNote.value.trim(), ...params }),
     });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
     const reader = resp.body.getReader();
@@ -1415,13 +1368,10 @@ document.getElementById('summary-all').onclick = async () => {
         if (!line.startsWith('data:')) continue;
         const payload = JSON.parse(line.slice(5).trim());
         if (payload.error) {
-          summaryRun.classList.remove('running');
           summaryOut.classList.add('error');
           summaryOut.style.display = 'block';
           summaryOut.textContent = payload.error;
-          summaryRun.textContent = 'Generate Summary';
-          summaryRun.disabled = false;
-          allBtn.disabled = false;
+          reset();
           return;
         }
         if (payload.text) {
@@ -1434,21 +1384,21 @@ document.getElementById('summary-all').onclick = async () => {
           summaryNote.style.height = 'auto';
           summaryRun.classList.remove('running');
           summaryRun.textContent = 'Done';
-          setTimeout(() => { summaryRun.textContent = 'Generate Summary'; summaryRun.disabled = false; }, 1200);
-          allBtn.disabled = false;
+          setTimeout(reset, 1200);
         }
       }
     }
   } catch (e) {
-    summaryRun.classList.remove('running');
     summaryOut.classList.add('error');
     summaryOut.style.display = 'block';
     summaryOut.textContent = 'Error: ' + e.message;
-    summaryRun.textContent = 'Generate Summary';
-    summaryRun.disabled = false;
-    allBtn.disabled = false;
+    reset();
   }
-};
+}
+
+document.getElementById('summary-fast').onclick    = () => runDropdownSummary({ fast: true });
+document.getElementById('summary-expensive').onclick = () => runDropdownSummary({ expensive: true });
+document.getElementById('summary-all').onclick     = () => runDropdownSummary({ full: true });
 
 // ── Download logs ─────────────────────────────────────────────────────────────
 document.getElementById('download-btn').onclick = async () => {
@@ -1506,14 +1456,6 @@ document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(btn => {
     renderMap();
   };
 });
-document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(btn => {
-  btn.onclick = () => {
-    _mapFilterHours = btn.dataset.mfHours === '' ? null : Number(btn.dataset.mfHours);
-    document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
-      b.classList.toggle('active', b === btn));
-    renderMap();
-  };
-});
 
 // ── Live audio ────────────────────────────────────────────────────────────────
 let _audioEl = null;
@@ -1551,13 +1493,49 @@ document.getElementById('audio-btn').onclick = async () => {
   }
 };
 
+// ── Audio clip playback ───────────────────────────────────────────────────────
+let _clipEl = null;
+let _clipBtn = null;
+
+async function playClip(filename, btn) {
+  if (_clipEl && !_clipEl.ended) {
+    _clipEl.pause();
+    _clipEl = null;
+    if (_clipBtn) { _clipBtn.textContent = '▶'; _clipBtn.classList.remove('playing'); }
+    if (btn === _clipBtn) { _clipBtn = null; return; }
+  }
+  _clipBtn = btn;
+  try {
+    const r = await fetch(`/api/audio/clip/${encodeURIComponent(filename)}`, { headers: authHeader() });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    _clipEl = new Audio(url);
+    _clipEl.onended = _clipEl.onerror = () => {
+      URL.revokeObjectURL(url);
+      _clipEl = null;
+      if (_clipBtn) { _clipBtn.textContent = '▶'; _clipBtn.classList.remove('playing'); _clipBtn = null; }
+    };
+    await _clipEl.play();
+    btn.textContent = '⏹';
+    btn.classList.add('playing');
+  } catch(e) {
+    if (_clipBtn) { _clipBtn.textContent = '▶'; _clipBtn.classList.remove('playing'); _clipBtn = null; }
+    console.error('Clip playback failed:', e);
+  }
+}
+
+document.getElementById('feed-log').addEventListener('click', e => {
+  const btn = e.target.closest('.tx-play-btn');
+  if (btn) playClip(btn.dataset.wav, btn);
+});
+
 // ── Share / QR ────────────────────────────────────────────────────────────────
 let shareUsers = [];
 
 async function checkShareAccess() {
   const r = await fetch('/api/users', { headers: authHeader(), cache: 'no-store' });
   const btn = document.getElementById('share-btn');
-  const allBtn = document.getElementById('summary-all');
   const caret = document.getElementById('summary-caret');
   if (r.ok) {
     isPrimaryUser = true;
@@ -1565,12 +1543,10 @@ async function checkShareAccess() {
     const sel = document.getElementById('share-for');
     sel.innerHTML = shareUsers.map(u => `<option value="${u.username}">${u.username}</option>`).join('');
     btn.style.display = '';
-    allBtn.style.display = '';
     if (caret) caret.style.display = '';
   } else {
     isPrimaryUser = false;
     btn.style.display = 'none';
-    allBtn.style.display = 'none';
     if (caret) caret.style.display = 'none';
   }
 }
@@ -1622,8 +1598,7 @@ document.getElementById('share-modal').addEventListener('click', e => {
 let _leafletLoaded = false;
 let _map           = null;
 let _mapMarkers    = {};   // incident number → Leaflet marker
-let _mapFilterStatus = 'active';   // 'active' | 'open' | 'all'
-let _mapFilterHours  = null;       // null=live (non-stale) | 4 | 12 | 24
+let _mapFilterStatus = 'live';     // 'live' | 'all'
 
 const LAFAYETTE_LL  = [40.4167, -86.8753];
 const MAP_STATUS_COLORS = {
@@ -1632,6 +1607,14 @@ const MAP_STATUS_COLORS = {
   routine: '#6b7280',
   clear:   '#22c55e',
 };
+
+function _markerStyle(incident) {
+  if (incident.is_stale) {
+    return { radius: 8, fillColor: '#6b7280', color: '#4b5563', weight: 1, opacity: 0.5, fillOpacity: 0.22 };
+  }
+  const color = MAP_STATUS_COLORS[incident.status_kind || 'watch'] || '#3b82f6';
+  return { radius: 10, fillColor: color, color: '#fff', weight: 2, opacity: 1, fillOpacity: 0.9 };
+}
 
 function _loadLeaflet() {
   if (_leafletLoaded) return Promise.resolve();
@@ -1657,16 +1640,13 @@ async function initMap() {
 }
 
 function _markerFor(incident, lat, lng) {
-  const color  = MAP_STATUS_COLORS[incident.status_kind || 'watch'] || '#3b82f6';
   const title  = incident.number ? `#${incident.number} ${incident.title || ''}` : (incident.title || 'Incident');
-  const marker = L.circleMarker([lat, lng], {
-    radius: 10, fillColor: color, color: '#fff',
-    weight: 2, opacity: 1, fillOpacity: 0.9,
-  });
+  const marker = L.circleMarker([lat, lng], _markerStyle(incident));
   const popupHtml = `
     <div class="map-popup-title">${escHtml(title)}</div>
     <div class="map-popup-sub">${escHtml(incident.status || 'WATCH')} · ${escHtml(incident.agency || '')}</div>
-    <div class="map-popup-sub" style="margin-bottom:8px">${escHtml(incident.location || '')}</div>
+    <div class="map-popup-sub">${escHtml(incident.location || '')}</div>
+    ${incident.first_seen ? `<div class="map-popup-sub" style="margin-bottom:8px">First: ${escHtml(incident.first_seen)}</div>` : '<div style="margin-bottom:8px"></div>'}
     <button class="map-popup-btn" onclick="goToIncidentCard(${Number(incident.number)})">Details</button>`;
   marker.bindPopup(popupHtml, { maxWidth: 260 });
   return marker;
@@ -1682,18 +1662,9 @@ function _updateMapStatus(count) {
 
 function _mapFilterMatch(i) {
   if (i.lat == null || i.lng == null) return false;
-  // Status filter
-  const kind = i.status_kind || 'watch';
-  if (_mapFilterStatus === 'active' && (kind !== 'active' || i.is_stale)) return false;
-  if (_mapFilterStatus === 'open'   && (kind === 'clear'  || i.is_stale)) return false;
-  // Time filter
-  if (_mapFilterHours != null) {
-    const age = (Date.now() / 1000) - (i.last_seen || 0);
-    if (age > _mapFilterHours * 3600) return false;
-  } else {
-    if (i.is_stale) return false;  // Live = non-stale
-  }
-  return true;
+  if (_mapFilterStatus === 'all') return true;
+  // live: non-stale, non-clear
+  return !i.is_stale && (i.status_kind || 'watch') !== 'clear';
 }
 
 function renderMap() {
@@ -1707,9 +1678,8 @@ function renderMap() {
 
   for (const incident of showable) {
     const id = String(incident.number);
-    const color = MAP_STATUS_COLORS[incident.status_kind || 'watch'] || '#3b82f6';
     if (_mapMarkers[id]) {
-      _mapMarkers[id].setStyle({ fillColor: color });
+      _mapMarkers[id].setStyle(_markerStyle(incident));
     } else {
       const marker = _markerFor(incident, incident.lat, incident.lng);
       marker.addTo(_map);

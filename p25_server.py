@@ -16,10 +16,11 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-LOG_FILE    = Path.home() / "op25_tippecanoe/p25_log.txt"
-STATIC      = Path(__file__).parent / "static"
-AUDIO_FIFO  = "/tmp/p25_audio.fifo"
-DB_FILE     = Path.home() / "op25_tippecanoe/p25_state.db"
+LOG_FILE         = Path.home() / "op25_tippecanoe/p25_log.txt"
+STATIC           = Path(__file__).parent / "static"
+AUDIO_FIFO       = "/tmp/p25_audio.fifo"
+DB_FILE          = Path.home() / "op25_tippecanoe/p25_state.db"
+AUDIO_CLIPS_DIR  = Path.home() / "op25_tippecanoe/audio_clips"
 
 USERNAME = os.environ.get("P25_USER", "p25")
 PASSWORD = os.environ.get("P25_PASSWORD", "scanner")
@@ -401,7 +402,7 @@ def check_summary_rate_limit(auth: dict):
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
-TX_RE         = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\] \[(.+?)\](?:\s+\[trunk:(tippecanoe|safet)\])? (.+)$')
+TX_RE         = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\] \[(.+?)\](?:\s+\[trunk:(tippecanoe|safet)\])?(?:\s+\[clip:([^\]]+)\])? (.+)$')
 SUMMARY_START      = re.compile(r'^=== SUMMARY === (.+)$')
 FULL_SUMMARY_MARKER = "=== FULL SUMMARY ==="
 FULL_SUMMARY_START  = re.compile(r'^=== FULL SUMMARY === (.+)$')
@@ -443,9 +444,12 @@ def parse_log() -> list[dict]:
         m = TX_RE.match(line)
         if m:
             tg = m.group(2)
-            entries.append({"type":"tx","id":f"tx-{tx_count}",
+            tx_entry: dict = {"type":"tx","id":f"tx-{tx_count}",
                             "time":m.group(1),"talkgroup":tg,
-                            "agency":_agency(tg),"trunk":m.group(3) or _trunk(tg),"text":m.group(4)})
+                            "agency":_agency(tg),"trunk":m.group(3) or _trunk(tg),"text":m.group(5)}
+            if m.group(4):
+                tx_entry["wav_file"] = m.group(4)
+            entries.append(tx_entry)
             tx_count += 1
             i += 1; continue
         ms = SUMMARY_START.match(line) or FULL_SUMMARY_START.match(line)
@@ -791,6 +795,10 @@ def init_state_db() -> None:
         );
         """)
         try:
+            conn.execute("ALTER TABLE transmissions ADD COLUMN wav_file TEXT")
+        except Exception:
+            pass  # column already exists
+        try:
             conn.execute("ALTER TABLE incident_state ADD COLUMN first_tx_id INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass  # column already exists
@@ -870,10 +878,10 @@ def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
                 continue
             tx_id = len(rows) + 1
             tg = m.group(2)
-            rows.append((tx_id, m.group(1), tg, _agency(tg), m.group(4), line))
+            rows.append((tx_id, m.group(1), tg, _agency(tg), m.group(5), m.group(4), line))
     conn.execute("DELETE FROM transmissions")
     conn.executemany(
-        "INSERT INTO transmissions(id, time, talkgroup, agency, text, raw_line) VALUES(?, ?, ?, ?, ?, ?)",
+        "INSERT INTO transmissions(id, time, talkgroup, agency, text, wav_file, raw_line) VALUES(?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     return len(rows)
@@ -1102,7 +1110,9 @@ async def live_stream(request: Request):
                             tg = m.group(2)
                             payload = {"type":"tx","time":m.group(1),
                                        "talkgroup":tg,"agency":_agency(tg),
-                                       "trunk":m.group(3) or _trunk(tg),"text":m.group(4)}
+                                       "trunk":m.group(3) or _trunk(tg),"text":m.group(5)}
+                            if m.group(4):
+                                payload["wav_file"] = m.group(4)
                             yield f"data: {json.dumps(payload)}\n\n"
                         ms = SUMMARY_START.match(line)
                         if ms:
@@ -1175,8 +1185,16 @@ Do not renumber incidents. For a new incident, use the next unused integer after
 Put any local context, landmark explanation, uncertainty, or secondary locations in Details, not Location. \
 Location is used directly as a map link label and query, so keep it clean and exact.
 
+CRITICAL — incident clearance: You MUST actively clear resolved incidents. \
+An incident should be marked CLEAR when: units return to service (10-8, available, in-service, back in service), \
+dispatch says disregard (10-22), scene is cleared, transport completed, or no follow-up activity suggests resolution. \
+Do NOT leave an incident ACTIVE just because it was active before — review the full log and mark it CLEAR if resolved. \
+Any incident in the existing board marked STALE (no radio traffic in 4+ hours) should be marked CLEAR unless \
+there is explicit ongoing activity in the log. A single brief mention with no follow-up should be CLEAR, not ACTIVE. \
+Incidents that are minor and short-duration (traffic stops, minor accidents, medical assists, welfare checks) \
+resolve within minutes and should be CLEAR unless you see continued traffic. \
 Use stable incident titles when an older incident is still being updated. \
-Note any unresolved situations. Be direct and concise."""
+Be direct and concise."""
 
 FULL_CHUNK_TEMPLATE = """\
 You are reviewing one chunk of Tippecanoe County public safety radio traffic.
@@ -1210,6 +1228,14 @@ Consolidate the chunk summaries below into one current incident list. Incident n
 identifiers. Use only integers, never letters. Reuse existing incident numbers for the same real-world \
 incident. Do not renumber incidents. Assign new incidents the next unused integer after the highest \
 existing incident number.
+
+CRITICAL — incident clearance: Actively review every incident in the existing board. \
+Mark incidents CLEAR when: units return to service (10-8, available), dispatch says disregard (10-22), \
+scene cleared, transport completed, or log shows no follow-up activity. \
+Incidents marked STALE (4+ hours with no traffic) MUST be marked CLEAR unless there is explicit \
+ongoing evidence in the log. Do not carry forward stale ACTIVE status — if in doubt, mark CLEAR. \
+A brief mention with no callback or follow-up = CLEAR. Short-duration calls (stops, minor accidents, \
+medical assists, welfare checks) resolve in minutes unless the log shows otherwise.
 
 Location must be a pure mappable address/place only, or Unknown. Put context, uncertainty, and secondary \
 locations in Details, not Location.
@@ -1254,11 +1280,17 @@ Return JSON only, with no markdown and no preamble. The JSON shape is:
 }}
 
 Rules:
-- Include only incidents directly mentioned or updated by the new transmissions.
+- Include incidents directly mentioned or updated by the new transmissions.
+- ALSO include any incident from the existing board marked STALE (no traffic in 4+ hours): mark it CLEAR
+  unless the new transmissions contain activity directly related to it. Do not leave stale incidents ACTIVE.
 - Reuse an existing incident number for the same real-world incident.
 - For a new incident, assign the next unused integer after the highest existing incident number.
 - Use only integer incident numbers, never letters.
 - Do not include administrative traffic unless it changes an incident.
+- Mark an incident CLEAR when: units return to service (10-8, available, in-service), dispatch says
+  disregard (10-22), scene cleared, transport done, or there is no follow-up after initial dispatch.
+  Short-duration calls (stops, minor accidents, medical assists, welfare checks) default to CLEAR unless
+  the log shows ongoing activity.
 - Location must be a pure mappable address/place only, or Unknown. Put uncertainty and context in details.
 - Keep each incident concise: at most two details.
 - If there are no incident updates, return {{"incidents":[]}}.
@@ -1268,6 +1300,7 @@ class SummarizeReq(BaseModel):
     note: str = ""
     full: bool = False
     expensive: bool = False
+    fast: bool = False
 
 class ShareLoginReq(BaseModel):
     ttl_seconds: int = DEFAULT_SHARE_TOKEN_SECONDS
@@ -1489,7 +1522,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 return
 
             created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            mode = "expensive" if req.expensive else "incremental"
+            mode = "expensive" if req.expensive else ("fast" if req.fast else "incremental")
             with _db() as conn:
                 current_incidents = incident_rows_from_db(conn)
                 incident_context = incident_board_context_from_incidents(current_incidents)
@@ -1503,14 +1536,22 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 incident_context=incident_context,
                 block="\n".join(lines),
             )
-            model = "claude-sonnet-4-6" if req.expensive else "claude-haiku-4-5-20251001"
+            if req.expensive:
+                prompt = (
+                    "Use web_search to silently look up any Lafayette/Tippecanoe address, business, "
+                    "or landmark you are uncertain about. Do not narrate searches.\n\n" + prompt
+                )
+            model = "claude-haiku-4-5-20251001" if req.fast else "claude-sonnet-4-6"
             try:
                 client = anthropic.AsyncAnthropic()
-                message = await client.messages.create(
-                    model=model,
-                    max_tokens=4096,
-                    messages=[{"role": "user", "content": prompt}],
-                )
+                create_kwargs: dict = {
+                    "model": model,
+                    "max_tokens": 4096,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if req.expensive:
+                    create_kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search"}]
+                message = await client.messages.create(**create_kwargs)
                 if message.stop_reason == "max_tokens":
                     raise RuntimeError("Claude hit max_tokens before finishing; cursor was not advanced.")
                 raw = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
@@ -1677,6 +1718,16 @@ async def audio_stream(auth: dict = Depends(require_auth)):
                 _audio_subs.discard(q)
     return StreamingResponse(generate(), media_type="audio/mpeg",
                              headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+@app.get("/api/audio/clip/{filename}", dependencies=[Depends(require_auth)])
+async def audio_clip(filename: str):
+    if not re.fullmatch(r'[\w.-]+\.wav', filename):
+        raise HTTPException(400, "Invalid filename")
+    path = AUDIO_CLIPS_DIR / filename
+    if not path.exists():
+        raise HTTPException(404, "Clip not found")
+    return FileResponse(str(path), media_type="audio/wav",
+                        headers={"Cache-Control": "max-age=86400"})
 
 @app.get("/api/geocode", dependencies=[Depends(require_auth)])
 async def geocode_address(q: str):
