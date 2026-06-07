@@ -455,8 +455,8 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   <div id="map-view">
     <div id="leaflet-map"></div>
     <div class="map-filter-bar">
-      <button class="map-filter-btn active" data-mf-status="active">Active</button>
-      <button class="map-filter-btn" data-mf-status="open">Open</button>
+      <button class="map-filter-btn" data-mf-status="active">Active</button>
+      <button class="map-filter-btn active" data-mf-status="open">Open</button>
       <button class="map-filter-btn" data-mf-status="all">All</button>
       <div class="map-filter-sep"></div>
       <button class="map-filter-btn active" data-mf-hours="">Live</button>
@@ -1622,7 +1622,7 @@ document.getElementById('share-modal').addEventListener('click', e => {
 let _leafletLoaded = false;
 let _map           = null;
 let _mapMarkers    = {};   // incident number → Leaflet marker
-let _mapFilterStatus = 'active';   // 'active' | 'open' | 'all'
+let _mapFilterStatus = 'open';     // 'active' | 'open' | 'all'
 let _mapFilterHours  = null;       // null=live (non-stale) | 4 | 12 | 24
 
 const LAFAYETTE_LL  = [40.4167, -86.8753];
