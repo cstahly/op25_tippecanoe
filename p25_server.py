@@ -69,6 +69,20 @@ _GEOCODE_MAX_KM = 150  # reject results farther than this from Lafayette
 _GEOCODE_SKIP = frozenset({"unknown", "", "n/a", "none", "n/a."})
 _geocode_failed: set[str] = set()  # addresses that returned no usable result this session
 
+# Terms that indicate a location already has city/state context
+_GEOCODE_CITY_HINTS = (
+    "lafayette", "west lafayette", "tippecanoe", "indiana", ", in",
+    "battle ground", "dayton", "shadeland", "otterbein", "west point",
+    "white county", "carroll county", "clinton county",
+)
+
+def _enrich_address(address: str) -> str:
+    """Append ', Lafayette, IN' to bare addresses that lack city/state context."""
+    lower = address.lower()
+    if any(h in lower for h in _GEOCODE_CITY_HINTS):
+        return address
+    return f"{address}, Lafayette, IN"
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
@@ -85,7 +99,8 @@ async def _geocode_one(address: str) -> tuple[float, float] | None:
         row = conn.execute("SELECT lat, lng FROM geocode_cache WHERE address = ?", (norm,)).fetchone()
         if row:
             return row["lat"], row["lng"]
-    params = urllib.parse.urlencode({"q": norm, "limit": "3", "bbox": _PHOTON_BBOX, **_PHOTON_BIAS})
+    query = _enrich_address(norm)
+    params = urllib.parse.urlencode({"q": query, "limit": "3", "bbox": _PHOTON_BBOX, **_PHOTON_BIAS})
     url = f"{_PHOTON_URL}?{params}"
     req = urllib.request.Request(url, headers={"User-Agent": "P25Monitor/1.0"})
     def _fetch():
