@@ -1,6 +1,6 @@
 # P25 System — Agent Handoff
 
-Last updated: 2026-06-06 (state DB session). Read before changing anything.
+Last updated: 2026-06-06 (satellite scheduler session). Read before changing anything.
 
 Hardware is a Kali bare-metal box. Full sudo is available. OP25 runs as a user terminal
 process; the web app runs under systemd.
@@ -15,7 +15,7 @@ process; the web app runs under systemd.
 | Whisper STT | Operational | `turbo`, CPU, int8. Do not use CUDA. |
 | Web app | Operational | `p25-server.service`, HTTPS via nginx |
 | Incident state DB | Operational | `~/op25_tippecanoe/p25_state.db` |
-| Satellite scheduler | Paused | Leave rules disabled unless user asks |
+| Satellite scheduler | **Active** | systemd service `sdr-scheduler.service`; rules live in `~/sdr_scheduler_rules.json` |
 
 Current DB snapshot at handoff:
 
@@ -217,19 +217,134 @@ Feed UI:
    ordering.
 5. **Do not restart OP25 casually**: user runs it manually and may be watching live traffic.
 6. **OP25 repo dirty file**: `~/src/op25/CMakeLists.txt` is modified and unrelated.
+7. **Satellite background summary thread**: dies silently; always run `sat_iq_summary.py` manually
+   to check results. See Section 8.
+8. **SO-50 zero-burst passes**: can be legit (nobody uplinked CTCSS to activate the repeater) or
+   a detection issue. Don't assume antenna problem without checking noise RMS in the WAV first.
 
 ---
 
-## 8. Satellite / Hardware / Misc
+## 8. Satellite Scheduler
 
-Satellite scheduler remains paused. Re-enable only if user asks.
+### Service and config
 
-Hardware:
+- **Service**: `~/.config/systemd/user/sdr-scheduler.service`
+- **Script**: `~/src/satellites-overhead/scheduler/sdr_scheduler.py`
+- **Rules file**: `~/sdr_scheduler_rules.json`
+- **Captures dir**: `~/cosmos_captures/`
+- **Location**: Lafayette, IN, ~40.42 N, 86.88 W
 
-- HackRF One serial `14d463dc2f209de1` is primary for P25.
-- RTL-SDR v3 backup.
-- Outdoor V-dipole around 137 MHz.
-- Location: Lafayette, IN, ~40.42 N, 86.88 W.
+Service runs as user systemd. Restart:
+
+```bash
+systemctl --user restart sdr-scheduler.service
+journalctl --user -u sdr-scheduler.service -f
+```
+
+### RTL-SDR hardware
+
+- RTL-SDR v3 (USB, idVendor 0bda / idProduct 2838) for satellite work.
+- HackRF One serial `14d463dc2f209de1` is primary for P25 — do not touch for satellite work.
+- Antenna: outdoor horizontal V-dipole cut for 145 MHz (53.7 cm arms), mounted on house.
+  - Good coverage from horizon to ~50-60° elevation.
+  - Has a pattern null directly overhead (horizontal null). High-elevation passes (>70°) will
+    show reduced signal. QFH antenna (antennas.us UC-1464-531, $288) is on the user's radar
+    but not yet ordered.
+
+### Critical fixed bugs (do not reintroduce)
+
+1. **USB autosuspend**: Linux was killing the RTL-SDR between passes. Fixed via udev rule at
+   `/etc/udev/rules.d/99-rtlsdr-autosuspend.rules` — sets `power/autosuspend=-1` for the device.
+   Do not remove this file.
+
+2. **Duplicate scheduler instances**: Two instances racing on the same USB device caused
+   `usb_claim_interface error -6`. Fixed with `fcntl.flock(LOCK_EX|LOCK_NB)` PID lock on
+   `~/.sdr_scheduler.pid`. The scheduler also kills any orphaned `rtl_sdr` processes before
+   each capture.
+
+3. **RTL-SDR gain**: Optimal gain is **37 dB**. At 49 dB, receiver noise floor was ~7800 RMS;
+   at 37 dB it drops to ~121. All rules in `sdr_scheduler_rules.json` have `lna_gain: 37`.
+   Do not raise gain chasing signal — it raises noise faster than signal.
+
+4. **Noise floor calibration bug** (fixed 2026-06-06): `find_bursts()` in `sat_iq_summary.py`
+   used the first 10 seconds of audio as the noise floor baseline. At high-elevation passes the
+   satellite is already strong at AOS, so the "noise floor" was contaminated with signal, inflating
+   the threshold and suppressing real detections. Fixed to use **10th-percentile of all per-window
+   RMS values** instead.
+
+5. **Background summary thread dying silently**: The scheduler spawns a daemon thread to run
+   `sat_iq_summary.py` after each capture. This thread can die without logging. **Always run
+   `sat_iq_summary.py` manually** when checking pass results; do not trust the auto-generated
+   `_summary.md` to exist.
+
+### Gain and noise floor reference
+
+| Gain (dB) | Noise RMS (WAV int16) |
+|---|---|
+| 49 | ~7800 |
+| 40 | ~823 |
+| 37 | ~121 |
+
+### Active capture rules (all enabled)
+
+| NORAD | Name | Freq | Profile | Notes |
+|---|---|---|---|---|
+| 27607 | SO-50 | 145.850 MHz | raw_iq_rtlsdr | FM repeater; needs CTCSS uplink |
+| 25338 | ISS | 145.825 MHz | raw_iq_rtlsdr | APRS digipeater |
+| 39444 | AO-73 (FUNcube-1) | 145.950 MHz | raw_iq_rtlsdr | SSB/CW linear |
+| 24278 | FO-29 | 435.800 MHz | raw_iq_rtlsdr | SSB/CW linear; min_peak_el=40 |
+| 44909 | RS-44 | 435.640 MHz | raw_iq_rtlsdr | SSB/CW linear; min_peak_el=40 |
+| 7530 | AO-7 | 435.100 MHz | raw_iq_rtlsdr | SSB/CW linear; min_peak_el=40 |
+| M2-2,3,4 | Meteor-M | 137.9/137.1 MHz | meteor_lrpt_rtlsdr | LRPT imagery |
+
+### Post-pass analysis: `sat_iq_summary.py`
+
+Location: `~/src/satellites-overhead/sat_iq_summary.py`
+
+For FM birds (SO-50, ISS):
+```bash
+python3 sat_iq_summary.py <file.wav> --norad 27607
+```
+
+For SSB/CW linear transponder birds (FO-29, RS-44, AO-7, AO-73):
+```bash
+python3 sat_iq_summary.py <file.wav> --norad 24278 --mode ssb --center_hz 435800000
+```
+
+Auto-mode picks SSB for NORAD IDs `{24278, 44909, 7530, 39444}`, FM otherwise.
+
+The SSB path (`ssb_scan_file`) reads CU8 IQ, runs FFT energy scan, finds peak offset, bins
+into 50 kHz slots, and writes a USB-demodded WAV. It reports peak SNR (5–6× = carrier
+detected, no voice; >8× suggests actual SSB audio).
+
+### Meteor LRPT decode pipeline
+
+satdump live RTL-SDR source is broken (`Could not find a handler for source type: rtlsdr!`).
+The working pipeline: capture CU8 IQ with `rtl_sdr`, then decode offline:
+
+```bash
+satdump meteor_m2-x_lrpt baseband <file.iq> <outdir> \
+  --samplerate 1000000 --baseband_format cu8 --iq_swap --dc_block
+```
+
+The scheduler handles this automatically via `rtlsdr_satdump_decode()` when profile is
+`meteor_lrpt_rtlsdr`. Look for `.cadu` files in the output directory to confirm decode success.
+
+### Pending satellite work
+
+- **Elevation priority for partial runs**: When scheduler has a device conflict and must choose
+  which pass to run, it should prefer higher peak elevation. Not yet implemented.
+- **Background summary thread reliability**: Consider replacing daemon thread with a subprocess
+  call that has proper logging to a file.
+- **QFH antenna**: antennas.us UC-1464-531 ($288) — user considering for better overhead coverage.
+- **Verify Meteor LRPT decode**: pipeline was fixed but hasn't had a confirmed successful pass yet.
+  Check `~/cosmos_captures/` for `.cadu` output after each Meteor pass.
+- **High-elevation SO-50 test**: 2026-06-07 ~09:32 UTC (5:32 AM EDT) SO-50 at 79.8° will be
+  the first high-elevation pass at correct 37 dB gain. Check it when it comes in.
+
+---
+
+## 9. Misc Hardware / Tools
 
 KLAF manual AM monitoring:
 

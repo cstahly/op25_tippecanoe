@@ -191,6 +191,15 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                            border-radius: 50%; background: var(--summary);
                            margin: 0 7px 2px 0; opacity: .8; }
 .incident-empty { color: var(--muted); text-align: center; padding: 70px 20px; }
+.incident-log-link { color: var(--muted); font-size: 11px; font-family: monospace;
+                     text-decoration: none; white-space: nowrap; }
+.incident-log-link:hover { color: var(--text); }
+@keyframes tx-flash {
+  0%   { box-shadow: 0 0 0 2px rgba(245,158,11,.0); border-color: var(--summary); }
+  18%  { box-shadow: 0 0 0 5px rgba(245,158,11,.45); border-color: var(--summary); }
+  100% { box-shadow: 0 0 0 0 rgba(245,158,11,.0);  border-color: var(--border); }
+}
+.tx-card.jump-target { animation: tx-flash 2.2s ease-out forwards; }
 
 .incident-modal { position: fixed; inset: 0; z-index: 45; display: none;
                   align-items: center; justify-content: center; padding: 18px;
@@ -250,6 +259,20 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                   line-height: 1.55; max-height: 140px; overflow-y: auto;
                   padding: 10px; white-space: pre-wrap; }
 .summary-output.error { border-color: rgba(239,68,68,.5); color: #fecaca; }
+/* ── Summary split-button dropdown ── */
+.summary-split { position: relative; display: flex; }
+.summary-split .summary-run:first-child { border-radius: 8px 0 0 8px; flex: 1; }
+.summary-caret { border-radius: 0 8px 8px 0; padding: 0 10px; border-left: 1px solid rgba(0,0,0,.25) !important; }
+.summary-dropdown-menu { position: absolute; bottom: calc(100% + 5px); right: 0;
+                         background: var(--surface2); border: 1px solid var(--border);
+                         border-radius: 8px; overflow: hidden; display: none;
+                         min-width: 170px; box-shadow: 0 4px 16px rgba(0,0,0,.4); z-index: 30; }
+.summary-dropdown-menu.open { display: block; }
+.summary-dropdown-item { display: block; width: 100%; text-align: left;
+                         background: none; border: none; color: var(--text);
+                         padding: 10px 14px; cursor: pointer; font-size: 13px;
+                         font-weight: 600; white-space: nowrap; }
+.summary-dropdown-item:hover { background: var(--border); }
 
 /* ── Share modal ── */
 .share-modal { position: fixed; inset: 0; z-index: 40; display: none;
@@ -293,6 +316,8 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   .incident-meta-row { justify-content: flex-start; }
   .summary-dock-inner { grid-template-columns: 1fr; }
   .summary-run { width: 100%; }
+  .summary-split { width: 100%; }
+  .summary-split .summary-run:first-child { flex: 1; }
 }
 </style>
 </head>
@@ -433,14 +458,20 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
     <textarea class="summary-note" id="summary-note" rows="1" placeholder="Optional note for summary"></textarea>
     <div class="summary-btn-group">
       <button class="summary-run" id="summary-all" style="display:none;opacity:.7" title="Summarize entire log">All</button>
-      <button class="summary-run" id="summary-run">Summarize</button>
+      <div class="summary-split">
+        <button class="summary-run" id="summary-run">Generate Summary</button>
+        <button class="summary-run summary-caret" id="summary-caret" title="More options" style="display:none">▾</button>
+        <div class="summary-dropdown-menu" id="summary-dropdown-menu">
+          <button class="summary-dropdown-item" id="summary-expensive">Expensive Summary</button>
+        </div>
+      </div>
     </div>
     <div class="summary-output" id="summary-output"></div>
   </div>
 </div>
 
 <script>
-const APP_VERSION = 'v19';
+const APP_VERSION = 'v26';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -527,6 +558,7 @@ if (AUTH || TOKEN) {
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
+let isPrimaryUser = false;
 let entries  = [];
 let entriesLatest = [];
 let incidents = [];
@@ -682,6 +714,7 @@ function makeIncidentCard(incident) {
     .join('');
   const updated = escHtml(incident.last_seen || incident.summary_time || '');
   const updates = `${Number(incident.updates || 1)} update${Number(incident.updates || 1) === 1 ? '' : 's'}`;
+  const hasTxAnchor = (incident.first_tx_id || 0) > 0;
   card.innerHTML = `
     <div class="incident-row-main">
       <div class="incident-card-title">${escHtml(title)}</div>
@@ -696,10 +729,18 @@ function makeIncidentCard(incident) {
       <span class="incident-agency">${escHtml(incident.agency || 'Unknown agency')}</span>
       <span class="incident-age">updated ${updated}</span>
       <span class="incident-age">${escHtml(updates)}</span>
+      ${hasTxAnchor ? `<a class="incident-log-link" href="#">→ log</a>` : ''}
     </div>
     <div class="incident-details">${details || '<div class="incident-detail">Awaiting a cleaner summary update.</div>'}</div>`;
   card.onclick = () => openIncidentModal(incident.number);
   card.querySelectorAll('a').forEach(a => a.onclick = e => e.stopPropagation());
+  if (hasTxAnchor) {
+    card.querySelector('.incident-log-link').onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      jumpToLogEntry(incident);
+    };
+  }
   return card;
 }
 
@@ -961,7 +1002,7 @@ function updateSummaryButtonCooldown() {
   if (currentUsername() !== 'viewer' || remaining <= 0) {
     btn.disabled = false;
     btn.classList.remove('running');
-    btn.textContent = 'Summarize';
+    btn.textContent = 'Generate Summary';
     return;
   }
   const tick = () => {
@@ -972,7 +1013,7 @@ function updateSummaryButtonCooldown() {
       return;
     }
     btn.disabled = true;
-    btn.textContent = `Summarize (${Math.ceil(left / 60)}:${String(left % 60).padStart(2, '0')})`;
+    btn.textContent = `Generate Summary (${Math.ceil(left / 60)}:${String(left % 60).padStart(2, '0')})`;
   };
   tick();
   summaryCooldownTimer = setInterval(tick, 1000);
@@ -1014,6 +1055,27 @@ function setView(view, updateHash = false) {
 }
 
 window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
+
+function jumpToLogEntry(incident) {
+  setView('feed');
+  const target = entries.find(e => e.id === `tx-${incident.first_tx_id}`);
+  if (!target || !target.id) return;
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`.tx-card[data-id="${CSS.escape(String(target.id))}"]`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const flash = () => {
+      el.classList.remove('jump-target');
+      void el.offsetWidth;
+      el.classList.add('jump-target');
+    };
+    const obs = new IntersectionObserver((entries, o) => {
+      if (entries[0].isIntersecting) { o.disconnect(); flash(); }
+    }, { threshold: 0.5 });
+    obs.observe(el);
+    setTimeout(() => { obs.disconnect(); flash(); }, 1500);
+  });
+}
 
 // ── Summary dock ──────────────────────────────────────────────────────────────
 const summaryNote = document.getElementById('summary-note');
@@ -1065,7 +1127,7 @@ summaryRun.onclick = async () => {
             localStorage.setItem(viewerCooldownKey(), `${Date.now() + (Number(payload.retry_after_seconds) * 1000)}`);
             updateSummaryButtonCooldown();
           } else {
-            summaryRun.textContent = 'Summarize';
+            summaryRun.textContent = 'Generate Summary';
             summaryRun.disabled = false;
           }
           return;
@@ -1081,7 +1143,7 @@ summaryRun.onclick = async () => {
             updateSummaryButtonCooldown();
           }
           setTimeout(() => {
-            summaryRun.textContent = 'Summarize';
+            summaryRun.textContent = 'Generate Summary';
             if (currentUsername() !== 'viewer') summaryRun.disabled = false;
           }, 1200);
         }
@@ -1092,8 +1154,87 @@ summaryRun.onclick = async () => {
     summaryOut.classList.add('error');
     summaryOut.style.display = 'block';
     summaryOut.textContent = 'Error: ' + e.message;
-    summaryRun.textContent = 'Summarize';
+    summaryRun.textContent = 'Generate Summary';
     summaryRun.disabled = false;
+  }
+};
+
+// ── Summary dropdown (caret + expensive) ─────────────────────────────────────
+const summaryCaretBtn = document.getElementById('summary-caret');
+const summaryDropdown = document.getElementById('summary-dropdown-menu');
+
+summaryCaretBtn.onclick = (e) => {
+  e.stopPropagation();
+  summaryDropdown.classList.toggle('open');
+};
+
+document.addEventListener('click', () => summaryDropdown.classList.remove('open'));
+
+document.getElementById('summary-expensive').onclick = async () => {
+  summaryDropdown.classList.remove('open');
+  summaryRun.disabled = true;
+  summaryCaretBtn.disabled = true;
+  summaryRun.classList.add('running');
+  summaryRun.textContent = 'Running';
+  summaryOut.classList.remove('error');
+  summaryOut.style.display = 'none';
+  summaryOut.textContent = '';
+
+  try {
+    const resp = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { ...authHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: summaryNote.value.trim(), expensive: true }),
+    });
+
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+    const reader = resp.body.getReader();
+    const dec    = new TextDecoder();
+    let   buf    = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = JSON.parse(line.slice(5).trim());
+        if (payload.error) {
+          summaryRun.classList.remove('running');
+          summaryOut.classList.add('error');
+          summaryOut.style.display = 'block';
+          summaryOut.textContent = payload.error;
+          summaryRun.textContent = 'Generate Summary';
+          summaryRun.disabled = false;
+          summaryCaretBtn.disabled = false;
+          return;
+        }
+        if (payload.done) {
+          await syncEntries();
+          summaryNote.value = '';
+          summaryNote.style.height = 'auto';
+          summaryRun.classList.remove('running');
+          summaryRun.textContent = 'Done';
+          setTimeout(() => {
+            summaryRun.textContent = 'Generate Summary';
+            summaryRun.disabled = false;
+            summaryCaretBtn.disabled = false;
+          }, 1200);
+        }
+      }
+    }
+  } catch (e) {
+    summaryRun.classList.remove('running');
+    summaryOut.classList.add('error');
+    summaryOut.style.display = 'block';
+    summaryOut.textContent = 'Error: ' + e.message;
+    summaryRun.textContent = 'Generate Summary';
+    summaryRun.disabled = false;
+    summaryCaretBtn.disabled = false;
   }
 };
 
@@ -1132,7 +1273,7 @@ document.getElementById('summary-all').onclick = async () => {
           summaryOut.classList.add('error');
           summaryOut.style.display = 'block';
           summaryOut.textContent = payload.error;
-          summaryRun.textContent = 'Summarize';
+          summaryRun.textContent = 'Generate Summary';
           summaryRun.disabled = false;
           allBtn.disabled = false;
           return;
@@ -1147,7 +1288,7 @@ document.getElementById('summary-all').onclick = async () => {
           summaryNote.style.height = 'auto';
           summaryRun.classList.remove('running');
           summaryRun.textContent = 'Done';
-          setTimeout(() => { summaryRun.textContent = 'Summarize'; summaryRun.disabled = false; }, 1200);
+          setTimeout(() => { summaryRun.textContent = 'Generate Summary'; summaryRun.disabled = false; }, 1200);
           allBtn.disabled = false;
         }
       }
@@ -1157,7 +1298,7 @@ document.getElementById('summary-all').onclick = async () => {
     summaryOut.classList.add('error');
     summaryOut.style.display = 'block';
     summaryOut.textContent = 'Error: ' + e.message;
-    summaryRun.textContent = 'Summarize';
+    summaryRun.textContent = 'Generate Summary';
     summaryRun.disabled = false;
     allBtn.disabled = false;
   }
@@ -1230,15 +1371,20 @@ async function checkShareAccess() {
   const r = await fetch('/api/users', { headers: authHeader(), cache: 'no-store' });
   const btn = document.getElementById('share-btn');
   const allBtn = document.getElementById('summary-all');
+  const caret = document.getElementById('summary-caret');
   if (r.ok) {
+    isPrimaryUser = true;
     shareUsers = await r.json();
     const sel = document.getElementById('share-for');
     sel.innerHTML = shareUsers.map(u => `<option value="${u.username}">${u.username}</option>`).join('');
     btn.style.display = '';
     allBtn.style.display = '';
+    if (caret) caret.style.display = '';
   } else {
+    isPrimaryUser = false;
     btn.style.display = 'none';
     allBtn.style.display = 'none';
+    if (caret) caret.style.display = 'none';
   }
 }
 

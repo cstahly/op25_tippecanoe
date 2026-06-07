@@ -234,15 +234,16 @@ def parse_log() -> list[dict]:
     if not LOG_FILE.exists():
         return []
     lines = LOG_FILE.read_text(errors="replace").splitlines()
-    entries, i = [], 0
+    entries, i, tx_count = [], 0, 1
     while i < len(lines):
         line = lines[i]
         m = TX_RE.match(line)
         if m:
             tg = m.group(2)
-            entries.append({"type":"tx","id":f"tx-{len(entries)}",
+            entries.append({"type":"tx","id":f"tx-{tx_count}",
                             "time":m.group(1),"talkgroup":tg,
                             "agency":_agency(tg),"text":m.group(3)})
+            tx_count += 1
             i += 1; continue
         ms = SUMMARY_START.match(line) or FULL_SUMMARY_START.match(line)
         if ms:
@@ -578,6 +579,24 @@ def init_state_db() -> None:
             completed_at TEXT NOT NULL DEFAULT ''
         );
         """)
+        try:
+            conn.execute("ALTER TABLE incident_state ADD COLUMN first_tx_id INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+        # Backfill first_tx_id for incidents created before this column existed.
+        # Find the earliest summary job whose output mentions each incident number.
+        unfilled = conn.execute("SELECT number FROM incident_state WHERE first_tx_id = 0").fetchall()
+        for row in unfilled:
+            number = row["number"]
+            job = conn.execute(
+                "SELECT from_tx_id FROM summary_jobs WHERE status = 'succeeded' AND output LIKE ? ORDER BY id ASC LIMIT 1",
+                (f"% INCIDENT {number}:%",),
+            ).fetchone()
+            if job:
+                conn.execute(
+                    "UPDATE incident_state SET first_tx_id = ? WHERE number = ? AND first_tx_id = 0",
+                    (int(job["from_tx_id"]) + 1, number),
+                )
 
 def _get_state(conn: sqlite3.Connection, key: str, default: str = "") -> str:
     row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
@@ -684,6 +703,7 @@ def _incident_row_to_api(row: sqlite3.Row) -> dict:
         "first_seen": row["first_seen"],
         "last_seen": row["last_seen"],
         "summary_time": row["last_seen"],
+        "first_tx_id": int(row["first_tx_id"]) if row["first_tx_id"] else 0,
         "updates": 1,
         "age_seconds": age_seconds,
         "is_stale": is_stale,
@@ -693,7 +713,7 @@ def _incident_by_number(conn: sqlite3.Connection, number: int) -> dict | None:
     row = conn.execute("SELECT * FROM incident_state WHERE number = ?", (number,)).fetchone()
     return _incident_row_to_api(row) if row else None
 
-def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str) -> None:
+def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id: int = 0) -> None:
     number = int(inc["number"])
     details = inc.get("details") or []
     if isinstance(details, str):
@@ -701,13 +721,16 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str) -> None:
     title = str(inc.get("title") or "Incident").strip()
     status = str(inc.get("status") or "WATCH").strip()
     blob = "\n".join([title, status, *(str(d) for d in details)])
-    row = conn.execute("SELECT first_seen FROM incident_state WHERE number = ?", (number,)).fetchone()
+    row = conn.execute("SELECT first_seen, first_tx_id FROM incident_state WHERE number = ?", (number,)).fetchone()
     first_seen = row["first_seen"] if row else now
+    stored_first_tx_id = int(row["first_tx_id"]) if row and row["first_tx_id"] else 0
+    # Only record first_tx_id on initial creation; preserve whatever is stored on updates
+    effective_first_tx_id = stored_first_tx_id if stored_first_tx_id else first_tx_id
     conn.execute(
         """
         INSERT INTO incident_state
-            (number, title, agency, status, status_kind, location, details_json, action, first_seen, last_seen, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (number, title, agency, status, status_kind, location, details_json, action, first_seen, last_seen, updated_at, first_tx_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(number) DO UPDATE SET
             title = excluded.title,
             agency = excluded.agency,
@@ -731,6 +754,7 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str) -> None:
             first_seen,
             now,
             now,
+            effective_first_tx_id,
         ),
     )
 
@@ -970,6 +994,7 @@ Rules:
 class SummarizeReq(BaseModel):
     note: str = ""
     full: bool = False
+    expensive: bool = False
 
 class ShareLoginReq(BaseModel):
     ttl_seconds: int = DEFAULT_SHARE_TOKEN_SECONDS
@@ -1140,6 +1165,18 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         lines = read_full_log()
         tx_rows = []
         from_tx_id = to_tx_id = 0
+    elif req.expensive:
+        if auth["username"] != USERNAME:
+            raise HTTPException(403, detail="Only the primary user can run an expensive summary")
+        ensure_state_ready()
+        with _db() as conn:
+            from_tx_id = int(_get_state(conn, "last_summarized_tx_id", "0") or "0")
+            tx_rows = conn.execute(
+                "SELECT * FROM transmissions WHERE id > ? ORDER BY id",
+                (from_tx_id,),
+            ).fetchall()
+            to_tx_id = tx_rows[-1]["id"] if tx_rows else from_tx_id
+            lines = [row["raw_line"] for row in tx_rows]
     else:
         try:
             check_summary_rate_limit(auth)
@@ -1179,12 +1216,13 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 return
 
             created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            mode = "expensive" if req.expensive else "incremental"
             with _db() as conn:
                 current_incidents = incident_rows_from_db(conn)
                 incident_context = incident_board_context_from_incidents(current_incidents)
                 cur = conn.execute(
                     "INSERT INTO summary_jobs(mode, from_tx_id, to_tx_id, status, created_at) VALUES(?, ?, ?, ?, ?)",
-                    ("incremental", from_tx_id + 1, to_tx_id, "running", created_at),
+                    (mode, from_tx_id + 1, to_tx_id, "running", created_at),
                 )
                 job_id = cur.lastrowid
 
@@ -1192,10 +1230,11 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 incident_context=incident_context,
                 block="\n".join(lines),
             )
+            model = "claude-sonnet-4-6" if req.expensive else "claude-haiku-4-5-20251001"
             try:
                 client = anthropic.AsyncAnthropic()
                 message = await client.messages.create(
-                    model="claude-sonnet-4-6",
+                    model=model,
                     max_tokens=4096,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -1217,7 +1256,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
             completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with _db() as conn:
                 for inc in updates:
-                    _upsert_incident(conn, inc, completed_at)
+                    _upsert_incident(conn, inc, completed_at, first_tx_id=from_tx_id + 1)
                 _set_state(conn, "last_summarized_tx_id", str(to_tx_id))
                 conn.execute(
                     "UPDATE summary_jobs SET status = ?, output = ?, completed_at = ? WHERE id = ?",
