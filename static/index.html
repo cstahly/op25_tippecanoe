@@ -416,11 +416,6 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <button class="view-tab" data-view="map">Map</button>
       </div>
       <div class="icon-group">
-        <div class="audio-ch-group" id="audio-ch-group" title="Audio channel filter">
-          <button class="audio-ch-btn active" data-ch="all">All</button>
-          <button class="audio-ch-btn" data-ch="0" style="color:var(--tippecanoe)">TC</button>
-          <button class="audio-ch-btn" data-ch="1" style="color:var(--safet)">ST</button>
-        </div>
         <button class="icon-btn" id="audio-btn" title="Listen live">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
@@ -1425,27 +1420,6 @@ document.getElementById('download-btn').onclick = async () => {
 };
 
 // ── Audio channel filter ──────────────────────────────────────────────────────
-document.querySelectorAll('.audio-ch-btn').forEach(btn => {
-  btn.onclick = async () => {
-    const ch = btn.dataset.ch;
-    try {
-      await fetch('/api/audio-filter', {
-        method: 'POST', headers: { ...authHeader(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filter: ch }),
-      });
-    } catch (_) {}
-    document.querySelectorAll('.audio-ch-btn').forEach(b => b.classList.toggle('active', b === btn));
-  };
-});
-(async () => {
-  try {
-    const r = await fetch('/api/audio-filter', { headers: authHeader() });
-    if (r.ok) {
-      const { filter } = await r.json();
-      document.querySelectorAll('.audio-ch-btn').forEach(b => b.classList.toggle('active', b.dataset.ch === filter));
-    }
-  } catch (_) {}
-})();
 
 // ── Map filters ───────────────────────────────────────────────────────────────
 document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(btn => {
