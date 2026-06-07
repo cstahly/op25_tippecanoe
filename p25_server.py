@@ -28,6 +28,7 @@ DEFAULT_SUMMARY_LIMIT = 0
 DEFAULT_SHARE_TOKEN_SECONDS = 14 * 24 * 60 * 60
 RATE_LIMITS: dict[str, float] = {}
 TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
+STALE_INCIDENT_SECONDS = int(os.environ.get("P25_STALE_INCIDENT_SECONDS", str(4 * 60 * 60)))
 
 app = FastAPI()
 
@@ -463,31 +464,37 @@ def incident_board_context_from_incidents(incidents: list[dict]) -> str:
     if not numbered:
         return "Existing numbered incident board: none yet. Start numbering at INCIDENT 1."
 
-    def sort_key(inc: dict):
-        kind = inc.get("status_kind", "watch")
-        priority = 0 if kind in ("active", "watch") else 1
-        return (priority, str(inc.get("last_seen", "")), int(inc["number"]))
-
-    open_items = [inc for inc in numbered if inc.get("status_kind") != "clear"]
+    fresh_open = [
+        inc for inc in numbered
+        if inc.get("status_kind") != "clear" and not inc.get("is_stale")
+    ]
+    stale_open = [
+        inc for inc in numbered
+        if inc.get("status_kind") != "clear" and inc.get("is_stale")
+    ]
     recent_closed = [
         inc for inc in numbered
         if inc.get("status_kind") == "clear"
     ]
-    open_items.sort(key=sort_key, reverse=True)
+
+    fresh_open.sort(key=lambda inc: (str(inc.get("last_seen", "")), int(inc["number"])), reverse=True)
+    stale_open.sort(key=lambda inc: (str(inc.get("last_seen", "")), int(inc["number"])), reverse=True)
     recent_closed.sort(key=lambda inc: (str(inc.get("last_seen", "")), int(inc["number"])), reverse=True)
 
-    selected = open_items[:60] + recent_closed[:10]
+    selected = fresh_open[:60] + stale_open[:15] + recent_closed[:10]
     selected.sort(key=lambda inc: int(inc["number"]))
 
     lines = [
         "Existing incident board subset. Reuse these numbers for matching. "
-        f"Showing {len(selected)} of {len(numbered)} incidents: most recent open items plus recently cleared items."
+        f"Showing {len(selected)} of {len(numbered)} incidents: fresh open items, some stale open items, and recently cleared items. "
+        f"Open incidents older than {STALE_INCIDENT_SECONDS // 3600}h are marked STALE."
     ]
     for inc in selected:
         location = inc.get("location") or "Unknown"
         status = inc.get("status") or "WATCH"
         title = inc.get("title") or "Incident"
-        lines.append(f"{inc['number']}. {status} | {title} | {location}")
+        stale = " | STALE" if inc.get("is_stale") else ""
+        lines.append(f"{inc['number']}. {status}{stale} | {title} | {location}")
     return "\n".join(lines)
 
 def _is_summary_marker(l: str) -> bool:
@@ -632,8 +639,38 @@ def incident_rows_from_db(conn: sqlite3.Connection) -> list[dict]:
     ).fetchall()
     return [_incident_row_to_api(row) for row in rows]
 
+def _parse_dt(text: str) -> datetime | None:
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%H:%M:%S"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if fmt == "%H:%M:%S":
+                today = datetime.now()
+                dt = dt.replace(year=today.year, month=today.month, day=today.day)
+            return dt
+        except ValueError:
+            pass
+    return None
+
+def _incident_age_seconds(last_seen: str) -> int | None:
+    dt = _parse_dt(last_seen)
+    if not dt:
+        return None
+    age = int((datetime.now() - dt).total_seconds())
+    return max(0, age)
+
+def _incident_is_stale(row_or_inc) -> bool:
+    if (row_or_inc["status_kind"] if isinstance(row_or_inc, sqlite3.Row) else row_or_inc.get("status_kind")) == "clear":
+        return False
+    last_seen = row_or_inc["last_seen"] if isinstance(row_or_inc, sqlite3.Row) else row_or_inc.get("last_seen", "")
+    age = _incident_age_seconds(last_seen)
+    return age is not None and age > STALE_INCIDENT_SECONDS
+
 def _incident_row_to_api(row: sqlite3.Row) -> dict:
     details = json.loads(row["details_json"] or "[]")
+    age_seconds = _incident_age_seconds(row["last_seen"])
+    is_stale = _incident_is_stale(row)
     return {
         "id": f"incident-{row['number']}",
         "number": row["number"],
@@ -648,6 +685,8 @@ def _incident_row_to_api(row: sqlite3.Row) -> dict:
         "last_seen": row["last_seen"],
         "summary_time": row["last_seen"],
         "updates": 1,
+        "age_seconds": age_seconds,
+        "is_stale": is_stale,
     }
 
 def _incident_by_number(conn: sqlite3.Connection, number: int) -> dict | None:

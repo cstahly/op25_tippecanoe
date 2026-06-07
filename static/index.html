@@ -162,6 +162,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .incident-card[data-kind="clear"] { border-left-color: var(--ems); opacity: .82; }
 .incident-card[data-kind="routine"] { border-left-color: var(--other); }
 .incident-card[data-kind="watch"] { border-left-color: var(--police); }
+.incident-card[data-stale="true"] { opacity: .68; }
 .incident-row-main { display: flex; align-items: flex-start; justify-content: space-between;
                      gap: 12px; min-width: 0; }
 .incident-card-title { font-size: 15px; font-weight: 800; line-height: 1.25; }
@@ -173,6 +174,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .incident-pill.status-active { border-color: rgba(245,158,11,.55); color: var(--summary); }
 .incident-pill.status-clear { border-color: rgba(34,197,94,.55); color: var(--ems); }
 .incident-pill.status-routine { border-color: rgba(107,114,128,.65); color: var(--muted); }
+.incident-pill.status-stale { border-color: rgba(107,114,128,.65); color: var(--muted); }
 .incident-subline { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px;
                     color: var(--muted); font-size: 12px; min-width: 0; }
 .incident-location { color: var(--text); font-size: 12px; line-height: 1.35; }
@@ -438,7 +440,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v18';
+const APP_VERSION = 'v19';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -602,6 +604,7 @@ function renderIncidents() {
       ${incidentFilterButton('open', 'Open')}
       ${incidentFilterButton('active', 'Active')}
       ${incidentFilterButton('watch', 'Watch')}
+      ${incidentFilterButton('stale', 'Stale')}
       ${incidentFilterButton('routine', 'Routine')}
       ${incidentFilterButton('clear', 'Clear')}
       ${incidentFilterButton('all', 'All')}
@@ -648,7 +651,8 @@ function filterIncidents() {
     const kind = incident.status_kind || 'watch';
     const statusMatch =
       incidentStatusFilter === 'all' ||
-      (incidentStatusFilter === 'open' && kind !== 'clear') ||
+      (incidentStatusFilter === 'open' && kind !== 'clear' && !incident.is_stale) ||
+      (incidentStatusFilter === 'stale' && incident.is_stale) ||
       kind === incidentStatusFilter;
     if (!statusMatch) return false;
     if (!q) return true;
@@ -670,6 +674,7 @@ function makeIncidentCard(incident) {
   const kind = incident.status_kind || 'watch';
   card.className = 'incident-card';
   card.dataset.kind = kind;
+  card.dataset.stale = incident.is_stale ? 'true' : 'false';
   const statusClass = `status-${kind}`;
   const title = incident.number ? `#${incident.number} ${incident.title || 'Incident'}` : (incident.title || 'Incident');
   const details = (incident.details || []).slice(0, 5)
@@ -682,6 +687,7 @@ function makeIncidentCard(incident) {
       <div class="incident-card-title">${escHtml(title)}</div>
       <div class="incident-meta-row">
         <span class="incident-pill ${statusClass}">${escHtml(incident.status || 'WATCH')}</span>
+        ${incident.is_stale ? '<span class="incident-pill status-stale">STALE</span>' : ''}
         <span class="incident-pill">${escHtml(incident.agency || 'Unknown')}</span>
       </div>
     </div>
@@ -757,7 +763,7 @@ function openIncidentModal(number) {
   if (!incident) return;
   const modal = document.getElementById('incident-modal');
   const title = incident.number ? `#${incident.number} ${incident.title || 'Incident'}` : (incident.title || 'Incident');
-  document.getElementById('incident-modal-kicker').textContent = incident.status || 'WATCH';
+  document.getElementById('incident-modal-kicker').textContent = incident.is_stale ? `${incident.status || 'WATCH'} · STALE` : (incident.status || 'WATCH');
   document.getElementById('incident-modal-title').textContent = title;
   document.getElementById('incident-modal-location').innerHTML = incident.location ? mapLocationHtml(incident.location) : 'Unknown';
   document.getElementById('incident-modal-agency').textContent = incident.agency || 'Unknown';
