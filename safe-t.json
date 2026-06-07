@@ -3,7 +3,7 @@
         {
             "name": "Voice",
             "device": "hackrf0",
-            "trunking_sysname": "Tippecanoe County",
+            "trunking_sysname": "Indiana SAFE-T",
             "demod_type": "cqpsk",
             "destination": "udp://127.0.0.1:23456",
             "meta_stream_name": "",
@@ -36,12 +36,12 @@
             {
                 "nac": "0x0",
                 "wacn": "0xBEE00",
-                "sysid": "0x6FD",
-                "sysname": "Tippecanoe County",
-                "control_channel_list": "851.05000,853.83750,857.73750",
+                "sysid": "0x6BD",
+                "sysname": "Indiana SAFE-T",
+                "control_channel_list": "858.71250,859.71250",
                 "whitelist": "",
                 "blacklist": "",
-                "tgid_tags_file": "trunk-tags.tsv",
+                "tgid_tags_file": "safe-t-tags.tsv",
                 "rid_tags_file": "",
                 "tdma_cc": false,
                 "crypt_behavior": 2
