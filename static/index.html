@@ -1151,6 +1151,7 @@ document.querySelectorAll('.filter-tab[data-trunk]').forEach(btn => {
 });
 
 document.getElementById('feed').addEventListener('click', e => {
+  if (e.target.closest('.tx-play-btn')) return;
   const card = e.target.closest('.tx-card.has-more');
   if (!card) return;
   card.classList.toggle('expanded');
