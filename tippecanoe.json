@@ -43,7 +43,7 @@
             "frequency": 855400000,
             "offset": 0,
             "ppm": 0.0,
-            "rate": 20000000,
+            "rate": 16000000,
             "usable_bw_pct": 0.85,
             "tunable": false
         }
@@ -59,7 +59,7 @@
                 "control_channel_list": "851.05000,853.83750,857.73750",
                 "whitelist": "",
                 "blacklist": "",
-                "tgid_tags_file": "trunk-tags.tsv",
+                "tgid_tags_file": "/home/cstahly/op25_tippecanoe/trunk-tags.tsv",
                 "rid_tags_file": "",
                 "tdma_cc": false,
                 "crypt_behavior": 2
@@ -72,7 +72,7 @@
                 "control_channel_list": "858.71250,859.71250",
                 "whitelist": "",
                 "blacklist": "",
-                "tgid_tags_file": "safe-t-tags.tsv",
+                "tgid_tags_file": "/home/cstahly/op25_tippecanoe/safe-t-tags.tsv",
                 "rid_tags_file": "",
                 "tdma_cc": false,
                 "crypt_behavior": 2
