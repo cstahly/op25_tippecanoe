@@ -59,7 +59,7 @@
             "name": "hackrf0",
             "offset": 25000,
             "ppm": 0.0,
-            "rate": 10000000,
+            "rate": 12000000,
             "usable_bw_pct": 0.85,
             "tunable": true
         }
