@@ -62,14 +62,15 @@ async def _audio_broadcast_loop():
 
 _PHOTON_URL   = "https://photon.komoot.io/api/"
 _PHOTON_BIAS  = {"lat": "40.4167", "lon": "-86.8753"}  # Lafayette, IN
-# Bounding box (lon_min,lat_min,lon_max,lat_max) covering Tippecanoe + ~5 surrounding counties
-_PHOTON_BBOX  = "-87.8,39.8,-86.3,40.9"
+_PHOTON_BBOX  = "-87.8,39.8,-86.3,40.9"               # lon_min,lat_min,lon_max,lat_max
+_GOOGLE_URL   = "https://maps.googleapis.com/maps/api/geocode/json"
+_GOOGLE_BOUNDS = "39.8,-87.8|40.9,-86.3"              # sw_lat,sw_lng|ne_lat,ne_lng bias
+GOOGLE_MAPS_KEY = os.environ.get("GOOGLE_MAPS_KEY", "")
 _GEOCODE_CENTER = (40.4167, -86.8753)
-_GEOCODE_MAX_KM = 150  # reject results farther than this from Lafayette
+_GEOCODE_MAX_KM = 150
 _GEOCODE_SKIP = frozenset({"unknown", "", "n/a", "none", "n/a."})
-_geocode_failed: set[str] = set()  # addresses that returned no usable result this session
+_geocode_failed: set[str] = set()
 
-# Terms that indicate a location already has city/state context
 _GEOCODE_CITY_HINTS = (
     "lafayette", "west lafayette", "tippecanoe", "indiana", ", in",
     "battle ground", "dayton", "shadeland", "otterbein", "west point",
@@ -77,7 +78,6 @@ _GEOCODE_CITY_HINTS = (
 )
 
 def _enrich_address(address: str) -> str:
-    """Append ', Lafayette, IN' to bare addresses that lack city/state context."""
     lower = address.lower()
     if any(h in lower for h in _GEOCODE_CITY_HINTS):
         return address
@@ -90,8 +90,48 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     return R * 2 * math.asin(math.sqrt(a))
 
+def _within_range(lat: float, lng: float) -> bool:
+    return _haversine_km(lat, lng, *_GEOCODE_CENTER) <= _GEOCODE_MAX_KM
+
+def _cache_geocode(norm: str, lat: float, lng: float):
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, cached_at) VALUES(?, ?, ?, ?)",
+            (norm, lat, lng, datetime.now().isoformat()),
+        )
+
+async def _geocode_photon(query: str) -> tuple[float, float] | None:
+    params = urllib.parse.urlencode({"q": query, "limit": "3", "bbox": _PHOTON_BBOX, **_PHOTON_BIAS})
+    req = urllib.request.Request(f"{_PHOTON_URL}?{params}", headers={"User-Agent": "P25Monitor/1.0"})
+    def _fetch():
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read())
+    data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+    for feature in data.get("features", []):
+        coords = feature["geometry"]["coordinates"]
+        lat, lng = float(coords[1]), float(coords[0])
+        if _within_range(lat, lng):
+            return lat, lng
+    return None
+
+async def _geocode_google(query: str) -> tuple[float, float] | None:
+    if not GOOGLE_MAPS_KEY:
+        return None
+    params = urllib.parse.urlencode({"address": query, "bounds": _GOOGLE_BOUNDS, "key": GOOGLE_MAPS_KEY})
+    req = urllib.request.Request(f"{_GOOGLE_URL}?{params}", headers={"User-Agent": "P25Monitor/1.0"})
+    def _fetch():
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read())
+    data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+    for result in data.get("results", []):
+        loc = result["geometry"]["location"]
+        lat, lng = float(loc["lat"]), float(loc["lng"])
+        if _within_range(lat, lng):
+            return lat, lng
+    return None
+
 async def _geocode_one(address: str) -> tuple[float, float] | None:
-    """Geocode via Photon with bbox + distance guard. Returns (lat, lng) or None."""
+    """Geocode via Photon, falling back to Google if Photon finds nothing."""
     norm = address.strip()
     if not norm or norm.lower() in _GEOCODE_SKIP or norm in _geocode_failed:
         return None
@@ -100,26 +140,13 @@ async def _geocode_one(address: str) -> tuple[float, float] | None:
         if row:
             return row["lat"], row["lng"]
     query = _enrich_address(norm)
-    params = urllib.parse.urlencode({"q": query, "limit": "3", "bbox": _PHOTON_BBOX, **_PHOTON_BIAS})
-    url = f"{_PHOTON_URL}?{params}"
-    req = urllib.request.Request(url, headers={"User-Agent": "P25Monitor/1.0"})
-    def _fetch():
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return json.loads(resp.read())
     try:
-        loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, _fetch)
-        for feature in data.get("features", []):
-            coords = feature["geometry"]["coordinates"]  # [lng, lat]
-            lat, lng = float(coords[1]), float(coords[0])
-            if _haversine_km(lat, lng, *_GEOCODE_CENTER) <= _GEOCODE_MAX_KM:
-                with _db() as conn:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, cached_at) VALUES(?, ?, ?, ?)",
-                        (norm, lat, lng, datetime.now().isoformat()),
-                    )
-                return lat, lng
-        # All results were out of range (or no results)
+        result = await _geocode_photon(query)
+        if result is None:
+            result = await _geocode_google(query)
+        if result:
+            _cache_geocode(norm, *result)
+            return result
         _geocode_failed.add(norm)
         return None
     except Exception as exc:
