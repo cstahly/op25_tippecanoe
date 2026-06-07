@@ -22,7 +22,7 @@
             "device": "hackrf0",
             "trunking_sysname": "Indiana SAFE-T",
             "demod_type": "cqpsk",
-            "destination": "udp://127.0.0.1:23456",
+            "destination": "udp://127.0.0.1:23457",
             "meta_stream_name": "",
             "excess_bw": 0.2,
             "filter_type": "rc",
@@ -87,7 +87,7 @@
                 "device_name": "default",
                 "udp_port": 23456,
                 "audio_gain": 1.0,
-                "number_channels": 1
+                "number_channels": 2
             }
         ]
     },

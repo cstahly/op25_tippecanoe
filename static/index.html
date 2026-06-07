@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>P25 Monitor</title>
 <link rel="manifest" href="/manifest.json">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
 <link rel="apple-touch-icon" href="/icon.svg">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -24,6 +25,8 @@
   --ems:        #22c55e;
   --other:      #6b7280;
   --summary:    #f59e0b;
+  --tippecanoe: #22d3ee;
+  --safet:      #c084fc;
   --radius:     10px;
 }
 
@@ -77,15 +80,26 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .icon-btn:hover { border-color: var(--text); }
 .icon-btn svg { width: 17px; height: 17px; }
 .icon-group { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+.audio-ch-group { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.audio-ch-btn { background: var(--bg); border: none; border-left: 1px solid var(--border); color: var(--muted);
+  font-size: 11px; font-weight: 700; padding: 0 9px; height: 33px; cursor: pointer; letter-spacing: .03em; }
+.audio-ch-btn:first-child { border-left: none; }
+.audio-ch-btn.active { background: var(--surface); color: var(--text); }
+.audio-ch-btn:hover:not(.active) { background: rgba(255,255,255,.05); }
 
 .filter-tabs { display: flex; gap: 4px; }
 .filter-tab { background: none; border: 1px solid var(--border); border-radius: 20px;
               color: var(--muted); padding: 4px 10px; font-size: 12px; cursor: pointer;
               transition: all .15s; }
 .filter-tab.active, .filter-tab:hover { color: var(--text); border-color: var(--text); }
-.filter-tab[data-filter="police"].active  { color: var(--police); border-color: var(--police); }
-.filter-tab[data-filter="fire"].active    { color: var(--fire);   border-color: var(--fire);   }
-.filter-tab[data-filter="ems"].active     { color: var(--ems);    border-color: var(--ems);    }
+.filter-tab[data-filter="police"].active      { color: var(--police);      border-color: var(--police);      }
+.filter-tab[data-filter="fire"].active        { color: var(--fire);        border-color: var(--fire);        }
+.filter-tab[data-filter="ems"].active         { color: var(--ems);         border-color: var(--ems);         }
+.filter-tab[data-trunk="tippecanoe"].active   { color: var(--tippecanoe);  border-color: var(--tippecanoe);  }
+.filter-tab[data-trunk="safet"].active        { color: var(--safet);       border-color: var(--safet);       }
+
+.tx-card[data-trunk="tippecanoe"] { border-top: 2px solid var(--tippecanoe); }
+.tx-card[data-trunk="safet"]      { border-top: 2px solid var(--safet); }
 
 /* ── Feed ── */
 #feed, #incidents { flex: 1; overflow-y: auto; padding: 12px 16px 180px; }
@@ -199,7 +213,21 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   18%  { box-shadow: 0 0 0 5px rgba(245,158,11,.45); border-color: var(--summary); }
   100% { box-shadow: 0 0 0 0 rgba(245,158,11,.0);  border-color: var(--border); }
 }
-.tx-card.jump-target { animation: tx-flash 2.2s ease-out forwards; }
+.tx-card.jump-target, .incident-card.jump-target { animation: tx-flash 2.2s ease-out forwards; }
+.tx-card.slice-dim { opacity: 0.18; transition: opacity 0.25s; }
+.tx-card.slice-in  { opacity: 1; }
+#slice-banner {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 7px 12px;
+  background: rgba(15,23,42,.92); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--summary);
+  font-size: 12px; color: var(--summary);
+}
+#slice-banner-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#slice-banner-clear { flex-shrink: 0; background: transparent; border: 1px solid currentColor;
+  color: inherit; padding: 2px 9px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+#slice-banner-clear:hover { background: rgba(245,158,11,.15); }
 
 .incident-modal { position: fixed; inset: 0; z-index: 45; display: none;
                   align-items: center; justify-content: center; padding: 18px;
@@ -302,6 +330,32 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                display: none; flex-direction: column; align-items: center; gap: 10px; }
 .empty-state svg { opacity: .3; }
 
+/* ── Map view ── */
+#map-view { flex: 1; display: none; position: relative; min-height: 0; }
+#leaflet-map { position: absolute; inset: 0; }
+.map-status-bar { position: absolute; bottom: 24px; right: 8px; z-index: 1000;
+                  background: rgba(13,17,23,.88); border: 1px solid var(--border);
+                  border-radius: 6px; color: var(--muted); font-size: 11px;
+                  padding: 4px 8px; pointer-events: none; }
+.map-filter-bar { position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+                  z-index: 1000; display: flex; gap: 6px; align-items: center;
+                  background: rgba(13,17,23,.88); border: 1px solid var(--border);
+                  border-radius: 8px; padding: 5px 8px; }
+.map-filter-btn { background: none; border: 1px solid var(--border); border-radius: 14px;
+                  color: var(--muted); font-size: 11px; font-weight: 600; padding: 2px 9px;
+                  cursor: pointer; white-space: nowrap; transition: all .15s; }
+.map-filter-btn.active { background: rgba(59,130,246,.18); border-color: var(--police);
+                          color: var(--text); }
+.map-filter-sep { width: 1px; height: 16px; background: var(--border); flex-shrink: 0; }
+.leaflet-popup-content-wrapper { background: var(--surface); border: 1px solid var(--border);
+                                  color: var(--text); border-radius: var(--radius); }
+.leaflet-popup-tip { background: var(--surface); }
+.leaflet-popup-content { margin: 10px 14px; font-size: 13px; }
+.map-popup-title { font-weight: 700; margin-bottom: 4px; }
+.map-popup-sub { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.map-popup-btn { background: var(--police); color: #fff; border: none; border-radius: 5px;
+                 padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
+
 @media (max-width: 640px) {
   header { align-items: stretch; flex-wrap: wrap; height: auto; padding: 8px 10px; }
   .header-title { min-width: 180px; }
@@ -348,11 +402,22 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <button class="filter-tab" data-filter="fire">Fire</button>
         <button class="filter-tab" data-filter="ems">EMS</button>
       </div>
+      <div class="filter-tabs">
+        <button class="filter-tab active" data-trunk="all">All</button>
+        <button class="filter-tab" data-trunk="tippecanoe">Tippecanoe</button>
+        <button class="filter-tab" data-trunk="safet">SAFE-T</button>
+      </div>
       <div class="view-tabs">
         <button class="view-tab active" data-view="feed">Log</button>
         <button class="view-tab" data-view="incidents">Incidents</button>
+        <button class="view-tab" data-view="map">Map</button>
       </div>
       <div class="icon-group">
+        <div class="audio-ch-group" id="audio-ch-group" title="Audio channel filter">
+          <button class="audio-ch-btn active" data-ch="all">All</button>
+          <button class="audio-ch-btn" data-ch="0" style="color:var(--tippecanoe)">TC</button>
+          <button class="audio-ch-btn" data-ch="1" style="color:var(--safet)">ST</button>
+        </div>
         <button class="icon-btn" id="audio-btn" title="Listen live">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
@@ -386,6 +451,20 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   </div>
   <div id="incidents">
     <div class="incident-empty">No summarized incidents yet</div>
+  </div>
+  <div id="map-view">
+    <div id="leaflet-map"></div>
+    <div class="map-filter-bar">
+      <button class="map-filter-btn active" data-mf-status="active">Active</button>
+      <button class="map-filter-btn" data-mf-status="open">Open</button>
+      <button class="map-filter-btn" data-mf-status="all">All</button>
+      <div class="map-filter-sep"></div>
+      <button class="map-filter-btn active" data-mf-hours="">Live</button>
+      <button class="map-filter-btn" data-mf-hours="4">4h</button>
+      <button class="map-filter-btn" data-mf-hours="12">12h</button>
+      <button class="map-filter-btn" data-mf-hours="24">24h</button>
+    </div>
+    <div class="map-status-bar" id="map-status-bar"></div>
   </div>
 </div>
 
@@ -421,6 +500,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
       <div class="incident-modal-row">
         <div class="incident-modal-label">Action</div>
         <div class="incident-modal-value" id="incident-modal-action"></div>
+      </div>
+      <div class="incident-modal-row" id="incident-modal-log-row" style="display:none">
+        <div class="incident-modal-label">Chat</div>
+        <div class="incident-modal-value">
+          <a id="incident-modal-log-link" href="#" class="incident-log-link">→ jump to log</a>
+        </div>
       </div>
     </div>
   </div>
@@ -562,8 +647,10 @@ let isPrimaryUser = false;
 let entries  = [];
 let entriesLatest = [];
 let incidents = [];
-let filter   = 'all';
+let filter      = 'all';
+let trunkFilter = 'all';
 let currentView = 'feed';
+let _sliceIncident = null;
 let lastStateSig = '';
 let lastFeedSig = '';
 let lastIncidentSig = '';
@@ -589,7 +676,8 @@ function renderFeed() {
   const previousHeight = feed.scrollHeight;
   const previousTop = feed.scrollTop;
   const visible = entriesLatest.filter(entry =>
-    filter === 'all' || entry.type === 'summary' || entry.agency === filter
+    (filter === 'all' || entry.type === 'summary' || entry.agency === filter) &&
+    (trunkFilter === 'all' || entry.type === 'summary' || entry.trunk === trunkFilter)
   );
 
   if (!visible.length) {
@@ -619,6 +707,7 @@ function renderFeed() {
   } else {
     feed.scrollTop = previousTop + (feed.scrollHeight - previousHeight);
   }
+  _applySlice();
 }
 
 function renderIncidents() {
@@ -683,9 +772,12 @@ function filterIncidents() {
     const kind = incident.status_kind || 'watch';
     const statusMatch =
       incidentStatusFilter === 'all' ||
-      (incidentStatusFilter === 'open' && kind !== 'clear' && !incident.is_stale) ||
-      (incidentStatusFilter === 'stale' && incident.is_stale) ||
-      kind === incidentStatusFilter;
+      (incidentStatusFilter === 'open'    && kind !== 'clear' && !incident.is_stale) ||
+      (incidentStatusFilter === 'stale'   && incident.is_stale) ||
+      (incidentStatusFilter === 'active'  && kind === 'active'  && !incident.is_stale) ||
+      (incidentStatusFilter === 'watch'   && kind === 'watch'   && !incident.is_stale) ||
+      (incidentStatusFilter === 'routine' && kind === 'routine' && !incident.is_stale) ||
+      (incidentStatusFilter === 'clear'   && kind === 'clear');
     if (!statusMatch) return false;
     if (!q) return true;
     const haystack = [
@@ -707,6 +799,7 @@ function makeIncidentCard(incident) {
   card.className = 'incident-card';
   card.dataset.kind = kind;
   card.dataset.stale = incident.is_stale ? 'true' : 'false';
+  card.dataset.number = incident.number;
   const statusClass = `status-${kind}`;
   const title = incident.number ? `#${incident.number} ${incident.title || 'Incident'}` : (incident.title || 'Incident');
   const details = (incident.details || []).slice(0, 5)
@@ -748,6 +841,7 @@ function makeTxCard(entry) {
   const card = document.createElement('div');
   card.className = 'tx-card';
   card.dataset.agency = entry.agency || 'other';
+  card.dataset.trunk = entry.trunk || 'tippecanoe';
   card.dataset.id = entry.id || '';
   const text = entry.text || '';
   const long = text.length > 120;
@@ -813,6 +907,14 @@ function openIncidentModal(number) {
     .map(d => `<div class="incident-detail">${escHtml(d)}</div>`)
     .join('') || '<div class="incident-detail">No details recorded.</div>';
   document.getElementById('incident-modal-error').style.display = 'none';
+  const logRow = document.getElementById('incident-modal-log-row');
+  const logLink = document.getElementById('incident-modal-log-link');
+  if ((incident.first_tx_id || 0) > 0) {
+    logRow.style.display = '';
+    logLink.onclick = (e) => { e.preventDefault(); modal.classList.remove('open'); jumpToLogEntry(incident); };
+  } else {
+    logRow.style.display = 'none';
+  }
   renderIncidentStatusControls(incident);
   modal.classList.add('open');
 }
@@ -953,6 +1055,7 @@ async function syncEntries() {
       incidents = state.incidents || [];
       lastIncidentSig = incidentSig;
       renderIncidents();
+      if (currentView === 'map') renderMap();
       if (document.getElementById('incident-modal').classList.contains('open') && selectedIncidentNumber) {
         openIncidentModal(selectedIncidentNumber);
       }
@@ -1020,11 +1123,20 @@ function updateSummaryButtonCooldown() {
 }
 
 // ── Filters ───────────────────────────────────────────────────────────────────
-document.querySelectorAll('.filter-tab').forEach(btn => {
+document.querySelectorAll('.filter-tab[data-filter]').forEach(btn => {
   btn.onclick = () => {
-    document.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.filter-tab[data-filter]').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     filter = btn.dataset.filter;
+    renderFeed();
+  };
+});
+
+document.querySelectorAll('.filter-tab[data-trunk]').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.filter-tab[data-trunk]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    trunkFilter = btn.dataset.trunk;
     renderFeed();
   };
 });
@@ -1045,33 +1157,67 @@ document.querySelectorAll('.view-tab').forEach(btn => {
 });
 
 function setView(view, updateHash = false) {
-  currentView = view === 'incidents' ? 'incidents' : 'feed';
+  currentView = ['incidents', 'map'].includes(view) ? view : 'feed';
+  if (currentView !== 'feed') _clearSlice();
   document.querySelectorAll('.view-tab').forEach(b => {
     b.classList.toggle('active', b.dataset.view === currentView);
   });
-  document.getElementById('feed').style.display = currentView === 'feed' ? 'block' : 'none';
+  document.getElementById('feed').style.display      = currentView === 'feed'      ? 'block' : 'none';
   document.getElementById('incidents').style.display = currentView === 'incidents' ? 'block' : 'none';
-  if (updateHash) location.hash = currentView === 'incidents' ? 'incidents' : '';
+  document.getElementById('map-view').style.display  = currentView === 'map'       ? 'flex'  : 'none';
+  if (currentView === 'map') {
+    initMap().then(renderMap);
+  }
+  if (updateHash) location.hash = currentView !== 'feed' ? currentView : '';
 }
 
 window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
 
+function _applySlice() {
+  const feed = document.getElementById('feed');
+  let banner = document.getElementById('slice-banner');
+  if (!_sliceIncident || !_sliceIncident.first_tx_id) {
+    document.querySelectorAll('.tx-card').forEach(c => c.classList.remove('slice-dim', 'slice-in'));
+    if (banner) banner.remove();
+    return;
+  }
+  const { first_tx_id, last_tx_id, number, title } = _sliceIncident;
+  const end = last_tx_id || first_tx_id;
+  document.querySelectorAll('.tx-card[data-id]').forEach(card => {
+    const txId = parseInt(card.dataset.id.replace('tx-', ''), 10);
+    const inSlice = txId >= first_tx_id && txId <= end;
+    card.classList.toggle('slice-in',  inSlice);
+    card.classList.toggle('slice-dim', !inSlice);
+  });
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'slice-banner';
+    banner.innerHTML = `<span id="slice-banner-label">Showing window for Incident #${number}: ${escHtml(title || '')}</span>`
+      + `<button id="slice-banner-clear">× Clear</button>`;
+    feed.parentNode.insertBefore(banner, feed);
+    document.getElementById('slice-banner-clear').onclick = _clearSlice;
+  }
+}
+
+function _clearSlice() {
+  _sliceIncident = null;
+  _applySlice();
+}
+
 function jumpToLogEntry(incident) {
+  _sliceIncident = (incident.first_tx_id > 0) ? incident : null;
   setView('feed');
+  renderFeed();
+  _applySlice();
+  if (!incident.first_tx_id) return;
   const target = entries.find(e => e.id === `tx-${incident.first_tx_id}`);
-  if (!target || !target.id) return;
+  if (!target) return;
   requestAnimationFrame(() => {
     const el = document.querySelector(`.tx-card[data-id="${CSS.escape(String(target.id))}"]`);
     if (!el) return;
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    const flash = () => {
-      el.classList.remove('jump-target');
-      void el.offsetWidth;
-      el.classList.add('jump-target');
-    };
-    const obs = new IntersectionObserver((entries, o) => {
-      if (entries[0].isIntersecting) { o.disconnect(); flash(); }
-    }, { threshold: 0.5 });
+    const flash = () => { el.classList.remove('jump-target'); void el.offsetWidth; el.classList.add('jump-target'); };
+    const obs = new IntersectionObserver((es, o) => { if (es[0].isIntersecting) { o.disconnect(); flash(); } }, { threshold: 0.5 });
     obs.observe(el);
     setTimeout(() => { obs.disconnect(); flash(); }, 1500);
   });
@@ -1328,6 +1474,47 @@ document.getElementById('download-btn').onclick = async () => {
   }
 };
 
+// ── Audio channel filter ──────────────────────────────────────────────────────
+document.querySelectorAll('.audio-ch-btn').forEach(btn => {
+  btn.onclick = async () => {
+    const ch = btn.dataset.ch;
+    try {
+      await fetch('/api/audio-filter', {
+        method: 'POST', headers: { ...authHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filter: ch }),
+      });
+    } catch (_) {}
+    document.querySelectorAll('.audio-ch-btn').forEach(b => b.classList.toggle('active', b === btn));
+  };
+});
+(async () => {
+  try {
+    const r = await fetch('/api/audio-filter', { headers: authHeader() });
+    if (r.ok) {
+      const { filter } = await r.json();
+      document.querySelectorAll('.audio-ch-btn').forEach(b => b.classList.toggle('active', b.dataset.ch === filter));
+    }
+  } catch (_) {}
+})();
+
+// ── Map filters ───────────────────────────────────────────────────────────────
+document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(btn => {
+  btn.onclick = () => {
+    _mapFilterStatus = btn.dataset.mfStatus;
+    document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(b =>
+      b.classList.toggle('active', b === btn));
+    renderMap();
+  };
+});
+document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(btn => {
+  btn.onclick = () => {
+    _mapFilterHours = btn.dataset.mfHours === '' ? null : Number(btn.dataset.mfHours);
+    document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
+      b.classList.toggle('active', b === btn));
+    renderMap();
+  };
+});
+
 // ── Live audio ────────────────────────────────────────────────────────────────
 let _audioEl = null;
 
@@ -1430,6 +1617,122 @@ document.getElementById('share-modal').addEventListener('click', e => {
   if (e.target === document.getElementById('share-modal'))
     document.getElementById('share-modal').classList.remove('open');
 });
+
+// ── Map view ──────────────────────────────────────────────────────────────────
+let _leafletLoaded = false;
+let _map           = null;
+let _mapMarkers    = {};   // incident number → Leaflet marker
+let _mapFilterStatus = 'active';   // 'active' | 'open' | 'all'
+let _mapFilterHours  = null;       // null=live (non-stale) | 4 | 12 | 24
+
+const LAFAYETTE_LL  = [40.4167, -86.8753];
+const MAP_STATUS_COLORS = {
+  active:  '#f59e0b',
+  watch:   '#3b82f6',
+  routine: '#6b7280',
+  clear:   '#22c55e',
+};
+
+function _loadLeaflet() {
+  if (_leafletLoaded) return Promise.resolve();
+  _leafletLoaded = true;
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    s.crossOrigin = '';
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+async function initMap() {
+  await _loadLeaflet();
+  if (_map) { _map.invalidateSize(); return; }
+  _map = L.map('leaflet-map', { center: LAFAYETTE_LL, zoom: 12, zoomControl: true });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19,
+  }).addTo(_map);
+}
+
+function _markerFor(incident, lat, lng) {
+  const color  = MAP_STATUS_COLORS[incident.status_kind || 'watch'] || '#3b82f6';
+  const title  = incident.number ? `#${incident.number} ${incident.title || ''}` : (incident.title || 'Incident');
+  const marker = L.circleMarker([lat, lng], {
+    radius: 10, fillColor: color, color: '#fff',
+    weight: 2, opacity: 1, fillOpacity: 0.9,
+  });
+  const popupHtml = `
+    <div class="map-popup-title">${escHtml(title)}</div>
+    <div class="map-popup-sub">${escHtml(incident.status || 'WATCH')} · ${escHtml(incident.agency || '')}</div>
+    <div class="map-popup-sub" style="margin-bottom:8px">${escHtml(incident.location || '')}</div>
+    <button class="map-popup-btn" onclick="goToIncidentCard(${Number(incident.number)})">Details</button>`;
+  marker.bindPopup(popupHtml, { maxWidth: 260 });
+  return marker;
+}
+
+function _updateMapStatus(count) {
+  const bar = document.getElementById('map-status-bar');
+  if (!bar) return;
+  bar.textContent = count
+    ? `${count} active incident${count === 1 ? '' : 's'} mapped`
+    : 'No active incidents with locations';
+}
+
+function _mapFilterMatch(i) {
+  if (i.lat == null || i.lng == null) return false;
+  // Status filter
+  const kind = i.status_kind || 'watch';
+  if (_mapFilterStatus === 'active' && (kind !== 'active' || i.is_stale)) return false;
+  if (_mapFilterStatus === 'open'   && (kind === 'clear'  || i.is_stale)) return false;
+  // Time filter
+  if (_mapFilterHours != null) {
+    const age = (Date.now() / 1000) - (i.last_seen || 0);
+    if (age > _mapFilterHours * 3600) return false;
+  } else {
+    if (i.is_stale) return false;  // Live = non-stale
+  }
+  return true;
+}
+
+function renderMap() {
+  if (!_map) return;
+  const showable = incidents.filter(_mapFilterMatch);
+  const showIds = new Set(showable.map(i => String(i.number)));
+
+  for (const [id, marker] of Object.entries(_mapMarkers)) {
+    if (!showIds.has(id)) { marker.remove(); delete _mapMarkers[id]; }
+  }
+
+  for (const incident of showable) {
+    const id = String(incident.number);
+    const color = MAP_STATUS_COLORS[incident.status_kind || 'watch'] || '#3b82f6';
+    if (_mapMarkers[id]) {
+      _mapMarkers[id].setStyle({ fillColor: color });
+    } else {
+      const marker = _markerFor(incident, incident.lat, incident.lng);
+      marker.addTo(_map);
+      _mapMarkers[id] = marker;
+    }
+  }
+  _updateMapStatus(showable.length);
+}
+
+function goToIncidentCard(number) {
+  if (_map) _map.closePopup();
+  setView('incidents');
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`.incident-card[data-number="${number}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.remove('jump-target');
+      void el.offsetWidth;
+      el.classList.add('jump-target');
+    }
+    openIncidentModal(number);
+  });
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 function init(data) {

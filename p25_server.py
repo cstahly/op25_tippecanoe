@@ -4,7 +4,7 @@ P25 web app backend.
   uvicorn p25_server:app --host 0.0.0.0 --port 8765
 Auth: P25_USER / P25_PASSWORD env vars (defaults: p25 / scanner)
 """
-import base64, hashlib, hmac, os, re, json, asyncio, secrets, time, sqlite3
+import base64, hashlib, hmac, os, re, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -29,6 +29,7 @@ DEFAULT_SHARE_TOKEN_SECONDS = 14 * 24 * 60 * 60
 RATE_LIMITS: dict[str, float] = {}
 TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
 STALE_INCIDENT_SECONDS = int(os.environ.get("P25_STALE_INCIDENT_SECONDS", str(4 * 60 * 60)))
+AUTO_SUMMARY_INTERVAL  = int(os.environ.get("P25_AUTO_SUMMARY_INTERVAL", str(2 * 60 * 60)))  # seconds
 
 app = FastAPI()
 
@@ -59,10 +60,125 @@ async def _audio_broadcast_loop():
             pass
         await asyncio.sleep(3)
 
+_PHOTON_URL  = "https://photon.komoot.io/api/"
+_PHOTON_BIAS = {"lat": "40.4167", "lon": "-86.8753"}  # Lafayette, IN
+_GEOCODE_SKIP = frozenset({"unknown", "", "n/a", "none", "n/a."})
+
+async def _geocode_one(address: str) -> tuple[float, float] | None:
+    """Geocode via Photon; cache result. Returns (lat, lng) or None."""
+    norm = address.strip()
+    if not norm or norm.lower() in _GEOCODE_SKIP:
+        return None
+    with _db() as conn:
+        row = conn.execute("SELECT lat, lng FROM geocode_cache WHERE address = ?", (norm,)).fetchone()
+        if row:
+            return row["lat"], row["lng"]
+    params = urllib.parse.urlencode({"q": norm, "limit": "1", **_PHOTON_BIAS})
+    url = f"{_PHOTON_URL}?{params}"
+    req = urllib.request.Request(url, headers={"User-Agent": "P25Monitor/1.0"})
+    def _fetch():
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read())
+    try:
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, _fetch)
+        features = data.get("features", [])
+        if not features:
+            return None
+        coords = features[0]["geometry"]["coordinates"]  # [lng, lat]
+        lat, lng = float(coords[1]), float(coords[0])
+        with _db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, cached_at) VALUES(?, ?, ?, ?)",
+                (norm, lat, lng, datetime.now().isoformat()),
+            )
+        return lat, lng
+    except Exception as exc:
+        sys.stderr.write(f"[geocode] {norm!r}: {exc}\n")
+        return None
+
+async def _geocode_worker():
+    """Background task: geocode all uncached incident locations."""
+    await asyncio.sleep(3)
+    while True:
+        try:
+            with _db() as conn:
+                rows = conn.execute("""
+                    SELECT DISTINCT i.location FROM incident_state i
+                    LEFT JOIN geocode_cache g ON i.location = g.address
+                    WHERE g.address IS NULL
+                      AND lower(i.location) NOT IN ('unknown','','n/a','none','n/a.')
+                    LIMIT 30
+                """).fetchall()
+            for row in rows:
+                await _geocode_one(row["location"])
+                await asyncio.sleep(0.25)
+            next_sleep = 10 if rows else 60
+        except Exception as exc:
+            sys.stderr.write(f"[geocode worker] {exc}\n")
+            next_sleep = 30
+        await asyncio.sleep(next_sleep)
+
+async def _auto_summary_worker():
+    """Run an incremental Haiku summary every AUTO_SUMMARY_INTERVAL seconds."""
+    await asyncio.sleep(60)  # let the server settle before first run
+    while True:
+        await asyncio.sleep(AUTO_SUMMARY_INTERVAL)
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            continue
+        try:
+            ensure_state_ready()
+            with _db() as conn:
+                from_tx_id = int(_get_state(conn, "last_summarized_tx_id", "0") or "0")
+                tx_rows = conn.execute(
+                    "SELECT * FROM transmissions WHERE id > ? ORDER BY id",
+                    (from_tx_id,),
+                ).fetchall()
+                if not tx_rows:
+                    continue
+                to_tx_id = tx_rows[-1]["id"]
+                lines = [row["raw_line"] for row in tx_rows]
+                current_incidents = incident_rows_from_db(conn)
+                incident_context = incident_board_context_from_incidents(current_incidents)
+
+            prompt = INCREMENTAL_JSON_TEMPLATE.format(
+                incident_context=incident_context,
+                block="\n".join(lines),
+            )
+            client = anthropic.AsyncAnthropic()
+            message = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            if message.stop_reason == "max_tokens":
+                sys.stderr.write("[auto-summary] hit max_tokens — skipping write\n")
+                continue
+            raw = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
+            updates = _validate_incident_updates(_parse_json_object(raw))
+            markdown = _incident_updates_markdown(updates)
+            completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with _db() as conn:
+                for inc in updates:
+                    _upsert_incident(conn, inc, completed_at, first_tx_id=from_tx_id + 1, last_tx_id=to_tx_id)
+                _set_state(conn, "last_summarized_tx_id", str(to_tx_id))
+                conn.execute(
+                    "INSERT INTO summary_jobs(mode, from_tx_id, to_tx_id, status, output, created_at, completed_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    ("auto", from_tx_id + 1, to_tx_id, "succeeded", markdown, completed_at, completed_at),
+                )
+            with open(LOG_FILE, "a") as f:
+                f.write(f"\n{SUMMARY_MARKER} {completed_at}\n{markdown}\n{'='*40}\n\n")
+            sys.stderr.write(f"[auto-summary] {completed_at}: processed {len(tx_rows)} lines, {len(updates)} incident updates\n")
+        except Exception as exc:
+            sys.stderr.write(f"[auto-summary] error: {exc}\n")
+
 @app.on_event("startup")
 async def _startup():
     ensure_state_ready()
     asyncio.create_task(_audio_broadcast_loop())
+    asyncio.create_task(_geocode_worker())
+    asyncio.create_task(_auto_summary_worker())
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
@@ -209,7 +325,7 @@ def check_summary_rate_limit(auth: dict):
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
-TX_RE         = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\] \[(.+?)\] (.+)$')
+TX_RE         = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\] \[(.+?)\](?:\s+\[trunk:(tippecanoe|safet)\])? (.+)$')
 SUMMARY_START      = re.compile(r'^=== SUMMARY === (.+)$')
 FULL_SUMMARY_MARKER = "=== FULL SUMMARY ==="
 FULL_SUMMARY_START  = re.compile(r'^=== FULL SUMMARY === (.+)$')
@@ -230,6 +346,17 @@ def _agency(tg: str) -> str:
     if any(x in t for x in ("EMS","TEAS")):                       return "ems"
     return "other"
 
+_SAFE_T_KEYWORDS = frozenset(["ISP", "BENTON", "CARROLL", "DELPHI", "CLINTON", "INDOT"])
+
+def _trunk(tg: str) -> str:
+    upper = tg.upper()
+    if any(k in upper for k in _SAFE_T_KEYWORDS):
+        return "safet"
+    m = re.search(r'(?:^|\()(\d{5,})\)?$', tg.strip())
+    if m and int(m.group(1)) >= 10000:
+        return "safet"
+    return "tippecanoe"
+
 def parse_log() -> list[dict]:
     if not LOG_FILE.exists():
         return []
@@ -242,7 +369,7 @@ def parse_log() -> list[dict]:
             tg = m.group(2)
             entries.append({"type":"tx","id":f"tx-{tx_count}",
                             "time":m.group(1),"talkgroup":tg,
-                            "agency":_agency(tg),"text":m.group(3)})
+                            "agency":_agency(tg),"trunk":m.group(3) or _trunk(tg),"text":m.group(4)})
             tx_count += 1
             i += 1; continue
         ms = SUMMARY_START.match(line) or FULL_SUMMARY_START.match(line)
@@ -579,8 +706,20 @@ def init_state_db() -> None:
             completed_at TEXT NOT NULL DEFAULT ''
         );
         """)
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS geocode_cache (
+            address TEXT PRIMARY KEY,
+            lat     REAL NOT NULL,
+            lng     REAL NOT NULL,
+            cached_at TEXT NOT NULL
+        );
+        """)
         try:
             conn.execute("ALTER TABLE incident_state ADD COLUMN first_tx_id INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE incident_state ADD COLUMN last_tx_id INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass  # column already exists
         # Backfill first_tx_id for incidents created before this column existed.
@@ -596,6 +735,19 @@ def init_state_db() -> None:
                 conn.execute(
                     "UPDATE incident_state SET first_tx_id = ? WHERE number = ? AND first_tx_id = 0",
                     (int(job["from_tx_id"]) + 1, number),
+                )
+        # Backfill last_tx_id from the most recent summary job that mentions each incident.
+        unfilled_last = conn.execute("SELECT number FROM incident_state WHERE last_tx_id = 0").fetchall()
+        for row in unfilled_last:
+            number = row["number"]
+            job = conn.execute(
+                "SELECT to_tx_id FROM summary_jobs WHERE status = 'succeeded' AND output LIKE ? ORDER BY id DESC LIMIT 1",
+                (f"% INCIDENT {number}:%",),
+            ).fetchone()
+            if job:
+                conn.execute(
+                    "UPDATE incident_state SET last_tx_id = ? WHERE number = ? AND last_tx_id = 0",
+                    (int(job["to_tx_id"]), number),
                 )
 
 def _get_state(conn: sqlite3.Connection, key: str, default: str = "") -> str:
@@ -642,7 +794,7 @@ def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
                 continue
             tx_id = len(rows) + 1
             tg = m.group(2)
-            rows.append((tx_id, m.group(1), tg, _agency(tg), m.group(3), line))
+            rows.append((tx_id, m.group(1), tg, _agency(tg), m.group(4), line))
     conn.execute("DELETE FROM transmissions")
     conn.executemany(
         "INSERT INTO transmissions(id, time, talkgroup, agency, text, raw_line) VALUES(?, ?, ?, ?, ?, ?)",
@@ -652,9 +804,11 @@ def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
 
 def incident_rows_from_db(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
-        "SELECT * FROM incident_state ORDER BY "
-        "CASE status_kind WHEN 'active' THEN 0 WHEN 'watch' THEN 1 WHEN 'routine' THEN 2 WHEN 'clear' THEN 3 ELSE 1 END, "
-        "last_seen DESC"
+        "SELECT i.*, g.lat AS lat, g.lng AS lng FROM incident_state i "
+        "LEFT JOIN geocode_cache g ON i.location = g.address "
+        "ORDER BY "
+        "CASE i.status_kind WHEN 'active' THEN 0 WHEN 'watch' THEN 1 WHEN 'routine' THEN 2 WHEN 'clear' THEN 3 ELSE 1 END, "
+        "i.last_seen DESC"
     ).fetchall()
     return [_incident_row_to_api(row) for row in rows]
 
@@ -690,6 +844,11 @@ def _incident_row_to_api(row: sqlite3.Row) -> dict:
     details = json.loads(row["details_json"] or "[]")
     age_seconds = _incident_age_seconds(row["last_seen"])
     is_stale = _incident_is_stale(row)
+    try:
+        lat = row["lat"]
+        lng = row["lng"]
+    except (IndexError, KeyError):
+        lat = lng = None
     return {
         "id": f"incident-{row['number']}",
         "number": row["number"],
@@ -704,16 +863,23 @@ def _incident_row_to_api(row: sqlite3.Row) -> dict:
         "last_seen": row["last_seen"],
         "summary_time": row["last_seen"],
         "first_tx_id": int(row["first_tx_id"]) if row["first_tx_id"] else 0,
+        "last_tx_id": int(row["last_tx_id"]) if row["last_tx_id"] else 0,
         "updates": 1,
         "age_seconds": age_seconds,
         "is_stale": is_stale,
+        "lat": lat,
+        "lng": lng,
     }
 
 def _incident_by_number(conn: sqlite3.Connection, number: int) -> dict | None:
-    row = conn.execute("SELECT * FROM incident_state WHERE number = ?", (number,)).fetchone()
+    row = conn.execute(
+        "SELECT i.*, g.lat AS lat, g.lng AS lng FROM incident_state i "
+        "LEFT JOIN geocode_cache g ON i.location = g.address "
+        "WHERE i.number = ?", (number,)
+    ).fetchone()
     return _incident_row_to_api(row) if row else None
 
-def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id: int = 0) -> None:
+def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id: int = 0, last_tx_id: int = 0) -> None:
     number = int(inc["number"])
     details = inc.get("details") or []
     if isinstance(details, str):
@@ -721,16 +887,17 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     title = str(inc.get("title") or "Incident").strip()
     status = str(inc.get("status") or "WATCH").strip()
     blob = "\n".join([title, status, *(str(d) for d in details)])
-    row = conn.execute("SELECT first_seen, first_tx_id FROM incident_state WHERE number = ?", (number,)).fetchone()
+    row = conn.execute("SELECT first_seen, first_tx_id, last_tx_id FROM incident_state WHERE number = ?", (number,)).fetchone()
     first_seen = row["first_seen"] if row else now
     stored_first_tx_id = int(row["first_tx_id"]) if row and row["first_tx_id"] else 0
-    # Only record first_tx_id on initial creation; preserve whatever is stored on updates
+    stored_last_tx_id  = int(row["last_tx_id"])  if row and row["last_tx_id"]  else 0
     effective_first_tx_id = stored_first_tx_id if stored_first_tx_id else first_tx_id
+    effective_last_tx_id  = max(stored_last_tx_id, last_tx_id)
     conn.execute(
         """
         INSERT INTO incident_state
-            (number, title, agency, status, status_kind, location, details_json, action, first_seen, last_seen, updated_at, first_tx_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (number, title, agency, status, status_kind, location, details_json, action, first_seen, last_seen, updated_at, first_tx_id, last_tx_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(number) DO UPDATE SET
             title = excluded.title,
             agency = excluded.agency,
@@ -740,7 +907,8 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
             details_json = excluded.details_json,
             action = excluded.action,
             last_seen = excluded.last_seen,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            last_tx_id = excluded.last_tx_id
         """,
         (
             number,
@@ -755,6 +923,7 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
             now,
             now,
             effective_first_tx_id,
+            effective_last_tx_id,
         ),
     )
 
@@ -808,6 +977,26 @@ def download_logs(auth: dict = Depends(require_auth)):
 def health():
     return {"ok": True, "log_exists": LOG_FILE.exists()}
 
+AUDIO_FILTER_FILE = "/tmp/p25_audio_filter"
+
+@app.get("/api/audio-filter", dependencies=[Depends(require_auth)])
+def get_audio_filter():
+    try:
+        val = Path(AUDIO_FILTER_FILE).read_text().strip()
+    except Exception:
+        val = "all"
+    return {"filter": val if val in ("all", "0", "1") else "all"}
+
+class AudioFilterReq(BaseModel):
+    filter: str
+
+@app.post("/api/audio-filter", dependencies=[Depends(require_auth)])
+def set_audio_filter(req: AudioFilterReq):
+    if req.filter not in ("all", "0", "1"):
+        raise HTTPException(400, detail="filter must be 'all', '0', or '1'")
+    Path(AUDIO_FILTER_FILE).write_text(req.filter)
+    return {"filter": req.filter}
+
 @app.get("/")
 def index():
     return FileResponse(
@@ -837,7 +1026,7 @@ async def live_stream(request: Request):
                             tg = m.group(2)
                             payload = {"type":"tx","time":m.group(1),
                                        "talkgroup":tg,"agency":_agency(tg),
-                                       "text":m.group(3)}
+                                       "trunk":m.group(3) or _trunk(tg),"text":m.group(4)}
                             yield f"data: {json.dumps(payload)}\n\n"
                         ms = SUMMARY_START.match(line)
                         if ms:
@@ -884,7 +1073,9 @@ ISP LAF ATG (10747, multigroup). INDOT CRW MAIN/ENG/EVENT (10558/10559/10560, IN
 {mode_section}
 {incident_context}
 
-Radio traffic (format [HH:MM:SS] [TALKGROUP] transcript):
+Radio traffic (format [HH:MM:SS] [TALKGROUP] [trunk:tippecanoe|safet] transcript).
+Trunk "tippecanoe" = Tippecanoe County P25 system. Trunk "safet" = Indiana SAFE-T (ISP/INDOT).
+Treat transmissions from different trunks as separate but potentially related systems.
 {block}
 
 Summarize what has been happening. Group by incident. Translate codes. \
@@ -921,7 +1112,8 @@ Preserve existing incident numbers when the traffic clearly belongs to one. For 
 label them NEW in this chunk summary; do not assign final numbers here.
 Output only incident sections. Do not include preamble, analysis narration, or search narration.
 
-Radio traffic:
+Radio traffic (format [HH:MM:SS] [TALKGROUP] [trunk:tippecanoe|safet] transcript).
+Trunk "tippecanoe" = Tippecanoe County P25. Trunk "safet" = Indiana SAFE-T (ISP/INDOT).
 {block}
 
 Return concise markdown sections:
@@ -966,7 +1158,8 @@ You update a live incident board for Tippecanoe County public safety radio traff
 Existing incident board:
 {incident_context}
 
-New transmissions since the last successful summary:
+New transmissions since the last successful summary (format [HH:MM:SS] [TALKGROUP] [trunk:tippecanoe|safet] transcript).
+Trunk "tippecanoe" = Tippecanoe County P25. Trunk "safet" = Indiana SAFE-T (ISP/INDOT).
 {block}
 
 Return JSON only, with no markdown and no preamble. The JSON shape is:
@@ -1260,7 +1453,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
             completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with _db() as conn:
                 for inc in updates:
-                    _upsert_incident(conn, inc, completed_at, first_tx_id=from_tx_id + 1)
+                    _upsert_incident(conn, inc, completed_at, first_tx_id=from_tx_id + 1, last_tx_id=to_tx_id)
                 _set_state(conn, "last_summarized_tx_id", str(to_tx_id))
                 conn.execute(
                     "UPDATE summary_jobs SET status = ?, output = ?, completed_at = ? WHERE id = ?",
@@ -1408,6 +1601,16 @@ async def audio_stream(auth: dict = Depends(require_auth)):
                 _audio_subs.discard(q)
     return StreamingResponse(generate(), media_type="audio/mpeg",
                              headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+@app.get("/api/geocode", dependencies=[Depends(require_auth)])
+async def geocode_address(q: str):
+    norm = q.strip()
+    if not norm or norm.lower() in _GEOCODE_SKIP:
+        raise HTTPException(404, detail="No geocodable address")
+    result = await _geocode_one(norm)
+    if not result:
+        raise HTTPException(404, detail="Address not found")
+    return JSONResponse({"lat": result[0], "lng": result[1]})
 
 app.mount("/", StaticFiles(directory=str(STATIC), html=True), name="static")
 
