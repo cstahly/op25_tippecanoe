@@ -1488,13 +1488,14 @@ async function playClip(filename, btn) {
   }
   _clipBtn = btn;
   try {
-    const r = await fetch(`/api/audio/clip/${encodeURIComponent(filename)}`, { headers: authHeader() });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
+    // Get a short-lived token first, then construct the URL and call play()
+    // within the same async chain so the browser honors the user gesture.
+    const tr = await fetch('/api/audio/token', { headers: authHeader(), cache: 'no-store' });
+    if (!tr.ok) throw new Error('token');
+    const { token } = await tr.json();
+    const url = `/api/audio/clip/${encodeURIComponent(filename)}?t=${encodeURIComponent(token)}`;
     _clipEl = new Audio(url);
     _clipEl.onended = _clipEl.onerror = () => {
-      URL.revokeObjectURL(url);
       _clipEl = null;
       if (_clipBtn) { _clipBtn.textContent = '▶'; _clipBtn.classList.remove('playing'); _clipBtn = null; }
     };
