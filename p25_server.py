@@ -225,9 +225,9 @@ def _strip_summary_preamble(text: str) -> str:
 
 def _agency(tg: str) -> str:
     t = tg.upper()
-    if any(x in t for x in ("LPD","WLPD","TCSD","PUPD")): return "police"
-    if any(x in t for x in ("LFD","WLFD","TCFD","PUFD")): return "fire"
-    if any(x in t for x in ("EMS","TEAS")):                return "ems"
+    if any(x in t for x in ("LPD","WLPD","TCSD","PUPD","ISP")): return "police"
+    if any(x in t for x in ("LFD","WLFD","TCFD","PUFD")):        return "fire"
+    if any(x in t for x in ("EMS","TEAS")):                       return "ems"
     return "other"
 
 def parse_log() -> list[dict]:
@@ -871,6 +871,10 @@ Zip codes: 47901/47904 (Lafayette core), 47905 (south Lafayette), 47906 (West La
 Talkgroups: TEAS EMS (1833/2225), TCFD/LFD/WLFD/PUFD (fire depts), \
 TCSD (1813, Tippecanoe County Sheriff), LPD (1931, Lafayette Police), \
 WLPD (2019, West Lafayette Police), PUPD (2119, Purdue University Police).
+
+Indiana SAFE-T talkgroups (Indiana State Police District 14 — Lafayette, covers Tippecanoe and surrounding counties): \
+ISP LAF DISP (10748, dispatch), ISP LAF OPS1/2/3 (10749/10750/10751, ops channels), \
+ISP LAF ATG (10747, multigroup). INDOT CRW MAIN/ENG/EVENT (10558/10559/10560, INDOT Crawfordsville district roads).
 
 10-codes: 10-4=ack, 10-7=OOS, 10-8=in service, 10-20=location, 10-22=disregard, \
 10-23=arrived, 10-27=DL check, 10-28=registration, 10-29=warrants, 10-33=emergency, \
