@@ -447,7 +447,7 @@ def parse_log() -> list[dict]:
             tx_entry: dict = {"type":"tx","id":f"tx-{tx_count}",
                             "time":m.group(1),"talkgroup":tg,
                             "agency":_agency(tg),"trunk":m.group(3) or _trunk(tg),"text":m.group(5)}
-            if m.group(4):
+            if m.group(4) and (AUDIO_CLIPS_DIR / m.group(4)).exists():
                 tx_entry["wav_file"] = m.group(4)
             entries.append(tx_entry)
             tx_count += 1
@@ -1111,7 +1111,7 @@ async def live_stream(request: Request):
                             payload = {"type":"tx","time":m.group(1),
                                        "talkgroup":tg,"agency":_agency(tg),
                                        "trunk":m.group(3) or _trunk(tg),"text":m.group(5)}
-                            if m.group(4):
+                            if m.group(4) and (AUDIO_CLIPS_DIR / m.group(4)).exists():
                                 payload["wav_file"] = m.group(4)
                             yield f"data: {json.dumps(payload)}\n\n"
                         ms = SUMMARY_START.match(line)
