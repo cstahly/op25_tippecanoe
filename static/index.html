@@ -1499,7 +1499,7 @@ async function playClip(filename, btn) {
   }
 }
 
-document.getElementById('feed-log').addEventListener('click', e => {
+document.getElementById('feed').addEventListener('click', e => {
   const btn = e.target.closest('.tx-play-btn');
   if (btn) playClip(btn.dataset.wav, btn);
 });
