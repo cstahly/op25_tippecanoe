@@ -161,10 +161,11 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 /* ── Incident board ── */
 .incident-tools { max-width: 980px; margin: 0 auto 10px; display: flex; flex-wrap: wrap;
                   gap: 8px; align-items: center; }
-.incident-search { flex: 1 1 260px; background: var(--surface); border: 1px solid var(--border);
+.incident-search, .feed-search { flex: 1 1 260px; background: var(--surface); border: 1px solid var(--border);
                    border-radius: 8px; color: var(--text); font-size: 13px;
                    padding: 9px 10px; min-width: 0; }
-.incident-search:focus { outline: none; border-color: var(--police); }
+.incident-search:focus, .feed-search:focus { outline: none; border-color: var(--police); }
+.feed-search-wrap { padding: 8px 12px 0; max-width: 700px; display: flex; }
 .incident-status-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
 .incident-status-tab { background: var(--surface); color: var(--muted); border: 1px solid var(--border);
                        border-radius: 999px; padding: 7px 10px; font-size: 11px;
@@ -438,6 +439,9 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
     </div>
   </header>
 
+  <div class="feed-search-wrap" id="feed-search-wrap">
+    <input class="feed-search" id="feed-search" type="search" placeholder="Search chat log" autocomplete="off">
+  </div>
   <div id="feed">
     <div class="empty-state" id="empty-state">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -653,6 +657,7 @@ let lastFeedSig = '';
 let lastIncidentSig = '';
 let pollingStarted = false;
 let summaryCooldownTimer = null;
+let feedSearch = '';
 let incidentSearch = '';
 let incidentStatusFilter = 'open';
 let selectedIncidentNumber = null;
@@ -672,10 +677,16 @@ function renderFeed() {
   const wasNearTop = feed.scrollTop < 24;
   const previousHeight = feed.scrollHeight;
   const previousTop = feed.scrollTop;
-  const visible = entriesLatest.filter(entry =>
-    (filter === 'all' || entry.type === 'summary' || entry.agency === filter) &&
-    (trunkFilter === 'all' || entry.type === 'summary' || entry.trunk === trunkFilter)
-  );
+  const feedQ = feedSearch.trim().toLowerCase();
+  const visible = entriesLatest.filter(entry => {
+    if (filter !== 'all' && entry.type !== 'summary' && entry.agency !== filter) return false;
+    if (trunkFilter !== 'all' && entry.type !== 'summary' && entry.trunk !== trunkFilter) return false;
+    if (feedQ && entry.type === 'tx') {
+      const hay = [entry.talkgroup, entry.text, entry.agency, entry.time].join(' ').toLowerCase();
+      if (!hay.includes(feedQ)) return false;
+    }
+    return true;
+  });
 
   if (!visible.length) {
     feed.dataset.newestId = '';
@@ -1147,6 +1158,11 @@ document.querySelectorAll('.filter-tab[data-filter]').forEach(btn => {
   };
 });
 
+document.getElementById('feed-search').addEventListener('input', e => {
+  feedSearch = e.target.value;
+  renderFeed();
+});
+
 document.querySelectorAll('.filter-tab[data-trunk]').forEach(btn => {
   btn.onclick = () => {
     document.querySelectorAll('.filter-tab[data-trunk]').forEach(b => b.classList.remove('active'));
@@ -1177,6 +1193,7 @@ function setView(view, updateHash = false) {
   document.querySelectorAll('.view-tab').forEach(b => {
     b.classList.toggle('active', b.dataset.view === currentView);
   });
+  document.getElementById('feed-search-wrap').style.display = currentView === 'feed' ? 'flex' : 'none';
   document.getElementById('feed').style.display      = currentView === 'feed'      ? 'block' : 'none';
   document.getElementById('incidents').style.display = currentView === 'incidents' ? 'block' : 'none';
   document.getElementById('map-view').style.display  = currentView === 'map'       ? 'flex'  : 'none';
