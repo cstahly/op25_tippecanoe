@@ -4,7 +4,7 @@ P25 web app backend.
   uvicorn p25_server:app --host 0.0.0.0 --port 8765
 Auth: P25_USER / P25_PASSWORD env vars (defaults: p25 / scanner)
 """
-import base64, hashlib, hmac, math, os, re, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
+import base64, hashlib, hmac, math, os, re, sys, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
