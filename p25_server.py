@@ -4,7 +4,7 @@ P25 web app backend.
   uvicorn p25_server:app --host 0.0.0.0 --port 8765
 Auth: P25_USER / P25_PASSWORD env vars (defaults: p25 / scanner)
 """
-import base64, hashlib, hmac, os, re, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
+import base64, hashlib, hmac, math, os, re, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -60,20 +60,32 @@ async def _audio_broadcast_loop():
             pass
         await asyncio.sleep(3)
 
-_PHOTON_URL  = "https://photon.komoot.io/api/"
-_PHOTON_BIAS = {"lat": "40.4167", "lon": "-86.8753"}  # Lafayette, IN
+_PHOTON_URL   = "https://photon.komoot.io/api/"
+_PHOTON_BIAS  = {"lat": "40.4167", "lon": "-86.8753"}  # Lafayette, IN
+# Bounding box (lon_min,lat_min,lon_max,lat_max) covering Tippecanoe + ~5 surrounding counties
+_PHOTON_BBOX  = "-87.8,39.8,-86.3,40.9"
+_GEOCODE_CENTER = (40.4167, -86.8753)
+_GEOCODE_MAX_KM = 150  # reject results farther than this from Lafayette
 _GEOCODE_SKIP = frozenset({"unknown", "", "n/a", "none", "n/a."})
+_geocode_failed: set[str] = set()  # addresses that returned no usable result this session
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return R * 2 * math.asin(math.sqrt(a))
 
 async def _geocode_one(address: str) -> tuple[float, float] | None:
-    """Geocode via Photon; cache result. Returns (lat, lng) or None."""
+    """Geocode via Photon with bbox + distance guard. Returns (lat, lng) or None."""
     norm = address.strip()
-    if not norm or norm.lower() in _GEOCODE_SKIP:
+    if not norm or norm.lower() in _GEOCODE_SKIP or norm in _geocode_failed:
         return None
     with _db() as conn:
         row = conn.execute("SELECT lat, lng FROM geocode_cache WHERE address = ?", (norm,)).fetchone()
         if row:
             return row["lat"], row["lng"]
-    params = urllib.parse.urlencode({"q": norm, "limit": "1", **_PHOTON_BIAS})
+    params = urllib.parse.urlencode({"q": norm, "limit": "3", "bbox": _PHOTON_BBOX, **_PHOTON_BIAS})
     url = f"{_PHOTON_URL}?{params}"
     req = urllib.request.Request(url, headers={"User-Agent": "P25Monitor/1.0"})
     def _fetch():
@@ -82,17 +94,19 @@ async def _geocode_one(address: str) -> tuple[float, float] | None:
     try:
         loop = asyncio.get_event_loop()
         data = await loop.run_in_executor(None, _fetch)
-        features = data.get("features", [])
-        if not features:
-            return None
-        coords = features[0]["geometry"]["coordinates"]  # [lng, lat]
-        lat, lng = float(coords[1]), float(coords[0])
-        with _db() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, cached_at) VALUES(?, ?, ?, ?)",
-                (norm, lat, lng, datetime.now().isoformat()),
-            )
-        return lat, lng
+        for feature in data.get("features", []):
+            coords = feature["geometry"]["coordinates"]  # [lng, lat]
+            lat, lng = float(coords[1]), float(coords[0])
+            if _haversine_km(lat, lng, *_GEOCODE_CENTER) <= _GEOCODE_MAX_KM:
+                with _db() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, cached_at) VALUES(?, ?, ?, ?)",
+                        (norm, lat, lng, datetime.now().isoformat()),
+                    )
+                return lat, lng
+        # All results were out of range (or no results)
+        _geocode_failed.add(norm)
+        return None
     except Exception as exc:
         sys.stderr.write(f"[geocode] {norm!r}: {exc}\n")
         return None
@@ -100,6 +114,21 @@ async def _geocode_one(address: str) -> tuple[float, float] | None:
 async def _geocode_worker():
     """Background task: geocode all uncached incident locations."""
     await asyncio.sleep(3)
+    # Purge cached results that landed outside the Lafayette area (wrong-state results)
+    try:
+        clat, clng = _GEOCODE_CENTER
+        with _db() as conn:
+            bad = conn.execute(
+                "SELECT address, lat, lng FROM geocode_cache"
+            ).fetchall()
+            purge = [r["address"] for r in bad
+                     if _haversine_km(r["lat"], r["lng"], clat, clng) > _GEOCODE_MAX_KM]
+            if purge:
+                conn.executemany("DELETE FROM geocode_cache WHERE address = ?", [(a,) for a in purge])
+                sys.stderr.write(f"[geocode] purged {len(purge)} out-of-range cache entries\n")
+    except Exception as exc:
+        sys.stderr.write(f"[geocode worker purge] {exc}\n")
+
     while True:
         try:
             with _db() as conn:
@@ -110,10 +139,11 @@ async def _geocode_worker():
                       AND lower(i.location) NOT IN ('unknown','','n/a','none','n/a.')
                     LIMIT 30
                 """).fetchall()
-            for row in rows:
-                await _geocode_one(row["location"])
+            pending = [r["location"] for r in rows if r["location"] not in _geocode_failed]
+            for loc in pending:
+                await _geocode_one(loc)
                 await asyncio.sleep(0.25)
-            next_sleep = 10 if rows else 60
+            next_sleep = 10 if pending else 60
         except Exception as exc:
             sys.stderr.write(f"[geocode worker] {exc}\n")
             next_sleep = 30
