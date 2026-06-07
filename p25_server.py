@@ -152,13 +152,17 @@ async def _geocode_worker():
                     LEFT JOIN geocode_cache g ON i.location = g.address
                     WHERE g.address IS NULL
                       AND lower(i.location) NOT IN ('unknown','','n/a','none','n/a.')
-                    LIMIT 30
+                    ORDER BY i.number DESC
                 """).fetchall()
             pending = [r["location"] for r in rows if r["location"] not in _geocode_failed]
+            if pending:
+                sys.stderr.write(f"[geocode] {len(pending)} addresses to geocode\n")
             for loc in pending:
-                await _geocode_one(loc)
-                await asyncio.sleep(0.25)
-            next_sleep = 10 if pending else 60
+                result = await _geocode_one(loc)
+                if result:
+                    sys.stderr.write(f"[geocode] ok: {loc!r} → {result[0]:.4f},{result[1]:.4f}\n")
+                await asyncio.sleep(0.3)
+            next_sleep = 60 if not pending else 10
         except Exception as exc:
             sys.stderr.write(f"[geocode worker] {exc}\n")
             next_sleep = 30
