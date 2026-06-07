@@ -1151,7 +1151,8 @@ document.querySelectorAll('.filter-tab[data-trunk]').forEach(btn => {
 });
 
 document.getElementById('feed').addEventListener('click', e => {
-  if (e.target.closest('.tx-play-btn')) return;
+  const playBtn = e.target.closest('.tx-play-btn');
+  if (playBtn) { playClip(playBtn.dataset.wav, playBtn); return; }
   const card = e.target.closest('.tx-card.has-more');
   if (!card) return;
   card.classList.toggle('expanded');
@@ -1500,10 +1501,6 @@ async function playClip(filename, btn) {
   }
 }
 
-document.getElementById('feed').addEventListener('click', e => {
-  const btn = e.target.closest('.tx-play-btn');
-  if (btn) playClip(btn.dataset.wav, btn);
-});
 
 // ── Share / QR ────────────────────────────────────────────────────────────────
 let shareUsers = [];
