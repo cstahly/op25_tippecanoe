@@ -4,7 +4,7 @@ P25 web app backend.
   uvicorn p25_server:app --host 0.0.0.0 --port 8765
 Auth: P25_USER / P25_PASSWORD env vars (defaults: p25 / scanner)
 """
-import base64, hashlib, hmac, math, os, re, sys, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
+import base64, hashlib, hmac, html as _html, math, os, re, sys, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -1191,16 +1191,19 @@ def _mycase_case_url(result: dict) -> str:
     b64 = base64.b64encode(payload.encode()).decode()
     return f"https://public.courts.in.gov/mycase/#/vw/CaseSummary/{b64}"
 
+_MYCASE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'"
+
 def _mycase_results_html(first: str, last: str, results: list, total: int) -> str:
-    name = f"{first} {last}".strip()
+    h = _html.escape
+    name = h(f"{first} {last}".strip())
     rows = ""
     for r in results:
-        url = _mycase_case_url(r)
-        num = r.get("CaseNumber", "")
-        style = r.get("Style", "")
-        charges = r.get("Charges") or ""
+        url = h(_mycase_case_url(r), quote=True)
+        num = h(r.get("CaseNumber", ""))
+        style = h(r.get("Style", ""))
+        charges = h(r.get("Charges") or "")
         rows += f'<li><a href="{url}">{num}</a> &mdash; {style}' + (f' <small>({charges})</small>' if charges else '') + '</li>\n'
-    summary = f"{total} case{'s' if total != 1 else ''} found" if results else "No cases found"
+    summary = h(f"{total} case{'s' if total != 1 else ''} found" if results else "No cases found")
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1244,13 +1247,18 @@ def mycase_search(first: str = "", last: str = ""):
             data = json.loads(resp.read())
     except Exception as exc:
         return HTMLResponse(
-            f"<h2>MyCase lookup failed</h2><p>{exc}</p>", status_code=502
+            f"<h2>MyCase lookup failed</h2><p>{_html.escape(str(exc))}</p>",
+            status_code=502,
+            headers={"Content-Security-Policy": _MYCASE_CSP},
         )
     results = data.get("Results") or []
     total = data.get("TotalResults", 0)
     if total == 1 and results:
         return RedirectResponse(url=_mycase_case_url(results[0]), status_code=303)
-    return HTMLResponse(_mycase_results_html(first, last, results, total))
+    return HTMLResponse(
+        _mycase_results_html(first, last, results, total),
+        headers={"Content-Security-Policy": _MYCASE_CSP},
+    )
 
 
 @app.get("/")
