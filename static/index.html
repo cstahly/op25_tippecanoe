@@ -1218,7 +1218,7 @@ document.querySelectorAll('.view-tab').forEach(btn => {
   };
 });
 
-function setView(view, updateHash = false) {
+function setView(view, updateHash = false, afterMap = null) {
   currentView = ['incidents', 'map'].includes(view) ? view : 'feed';
   if (currentView !== 'feed') _clearSlice();
   document.querySelectorAll('.view-tab').forEach(b => {
@@ -1229,7 +1229,7 @@ function setView(view, updateHash = false) {
   document.getElementById('incidents').style.display = currentView === 'incidents' ? 'block' : 'none';
   document.getElementById('map-view').style.display  = currentView === 'map'       ? 'flex'  : 'none';
   if (currentView === 'map') {
-    initMap().then(renderMap);
+    initMap().then(() => { renderMap(); if (afterMap) afterMap(); });
   }
   if (updateHash) location.hash = currentView !== 'feed' ? currentView : '';
 }
@@ -1809,13 +1809,11 @@ function goToIncidentOnMap(number) {
     b.classList.toggle('active', b.dataset.trunk === 'all'));
 
   document.getElementById('incident-modal').classList.remove('open');
-  setView('map');
-  initMap().then(() => {
-    renderMap();
+  setView('map', false, () => {
     const marker = _mapMarkers[String(incident.number)];
     if (!marker) return;
-    _map.once('moveend', () => marker.openPopup());
     _map.setView([incident.lat, incident.lng], 15, { animate: false });
+    marker.openPopup();
   });
 }
 
