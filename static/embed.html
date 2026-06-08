@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tippecanoe County P25 Scanner</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --active: #f85149;
+  --watch: #d29922; --clear: #484f58; --tc: #58a6ff; --st: #bc8cff;
+  --radius: 8px; --font: system-ui, -apple-system, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font-family: var(--font);
+       font-size: 14px; line-height: 1.5;
+       display: flex; flex-direction: column; }
+#scroll-pane { flex: 1; overflow-y: auto; min-height: 0; }
+a { color: var(--tc); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Header ── */
+.header { display: flex; align-items: center; gap: 10px;
+          padding: 10px 14px; border-bottom: 1px solid var(--border);
+          background: var(--surface); position: sticky; top: 0; z-index: 1000; }
+.header-title { font-weight: 700; font-size: 13px; letter-spacing: .02em; flex: 1; }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: #484f58;
+            flex-shrink: 0; transition: background .4s; }
+.live-dot.live   { background: #3fb950; animation: pulse 2.5s infinite; }
+.live-dot.stale  { background: var(--watch); }
+.live-dot.down   { background: var(--active); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+.updated { font-size: 11px; color: var(--muted); }
+
+/* ── Map ── */
+#map { height: 280px; width: 100%; border-bottom: 1px solid var(--border); }
+.leaflet-popup-content-wrapper { background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--radius); box-shadow: 0 4px 16px rgba(0,0,0,.5); }
+.leaflet-popup-tip { background: var(--surface); }
+.leaflet-popup-content { margin: 10px 12px; font-size: 12px; line-height: 1.5; }
+.popup-title { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+.popup-meta { color: var(--muted); font-size: 11px; }
+.popup-status { display: inline-block; border-radius: 4px; padding: 1px 6px;
+                font-size: 10px; font-weight: 700; margin-top: 4px; }
+.popup-status.active { background: rgba(248,81,73,.2); color: var(--active); }
+.popup-status.watch  { background: rgba(210,153,34,.2); color: var(--watch); }
+.popup-status.clear  { background: rgba(72,79,88,.3);   color: var(--muted); }
+
+/* ── Sections ── */
+.section { padding: 12px 14px; }
+.section-title { font-size: 11px; font-weight: 700; letter-spacing: .06em;
+                 text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+
+/* ── Incident cards ── */
+.incident { background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 10px 12px; margin-bottom: 8px;
+            border-left: 3px solid var(--border); cursor: default; }
+.incident[data-kind="active"] { border-left-color: var(--active); }
+.incident[data-kind="watch"]  { border-left-color: var(--watch); }
+.incident[data-kind="clear"]  { border-left-color: var(--clear); opacity: .65; }
+.incident.highlighted { outline: 1px solid var(--tc); transition: outline-color 3s ease; }
+.incident { transition: outline-color .3s; }
+.inc-header { display: flex; align-items: flex-start; gap: 8px; }
+.inc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; }
+.incident[data-kind="active"] .inc-dot { background: var(--active); }
+.incident[data-kind="watch"]  .inc-dot { background: var(--watch); }
+.incident[data-kind="clear"]  .inc-dot { background: var(--clear); }
+.inc-title { font-weight: 600; font-size: 13px; flex: 1; }
+.inc-age { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.inc-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px;
+            font-size: 11px; color: var(--muted); }
+.inc-badge { background: rgba(255,255,255,.06); border-radius: 4px; padding: 1px 6px; }
+.inc-details { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: none; }
+.inc-details.open { display: block; }
+.inc-detail { font-size: 12px; color: var(--muted); padding: 2px 0; }
+.inc-detail::before { content: "• "; }
+.inc-action { font-size: 12px; margin-top: 6px; color: var(--text); }
+.toggle-btn { background: none; border: none; color: var(--muted); font-size: 11px;
+              cursor: pointer; padding: 4px 0 0; display: block; }
+.toggle-btn:hover { color: var(--text); }
+.empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+
+/* ── TX feed ── */
+.tx { padding: 7px 0; border-bottom: 1px solid var(--border); display: flex;
+      flex-direction: column; gap: 3px; }
+.tx:last-child { border-bottom: none; }
+.tx-meta { display: flex; align-items: center; gap: 6px; }
+.tx-badge { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
+.tx-badge[data-trunk="tippecanoe"] { background: rgba(88,166,255,.15); color: var(--tc); }
+.tx-badge[data-trunk="safet"]      { background: rgba(188,140,255,.15); color: var(--st); }
+.tx-badge[data-trunk=""]           { background: rgba(255,255,255,.06); color: var(--muted); }
+.tx-tg { font-size: 11px; font-weight: 600; }
+.tx-time { font-size: 10px; color: var(--muted); margin-left: auto; }
+.tx-text { font-size: 12px; color: var(--muted); }
+.tx-play { background: none; border: none; color: var(--muted); font-size: 13px;
+           cursor: pointer; padding: 0 2px; line-height: 1; transition: color .15s; }
+.tx-play:hover { color: var(--text); }
+.tx-play.playing { color: var(--tc); }
+.tx-play.loading { color: var(--muted); pointer-events: none; animation: spin .7s linear infinite; display: inline-block; }
+
+/* ── Section tabs ── */
+.section-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); }
+.stab { background: none; border: none; border-bottom: 2px solid transparent;
+        color: var(--muted); font-size: 12px; font-weight: 600; padding: 8px 14px;
+        cursor: pointer; transition: all .15s; margin-bottom: -1px; }
+.stab:hover { color: var(--text); }
+.stab.on { border-bottom-color: var(--tc); color: var(--text); }
+
+/* ── Filter bar ── */
+.filter-bar { display: flex; gap: 8px; align-items: center; padding: 8px 14px;
+              border-bottom: 1px solid var(--border); background: var(--bg); }
+.filter-sep { width: 1px; height: 16px; background: var(--border); }
+.fpill { background: none; border: 1px solid var(--border); border-radius: 20px;
+         color: var(--muted); font-size: 11px; font-weight: 600; padding: 3px 11px;
+         cursor: pointer; transition: all .15s; }
+.fpill:hover { border-color: var(--text); color: var(--text); }
+.fpill.on { background: rgba(88,166,255,.15); border-color: var(--tc); color: var(--text); }
+
+/* ── Footer ── */
+.footer { padding: 10px 14px; border-top: 1px solid var(--border);
+          font-size: 11px; color: var(--clear); text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="live-dot" id="dot"></div>
+  <div class="header-title">Tippecanoe County P25</div>
+  <div class="updated" id="radio-status"></div>
+</div>
+
+<div id="map"></div>
+
+<div id="scroll-pane">
+<div class="filter-bar">
+  <button class="fpill on" data-sf="all">All</button>
+  <button class="fpill"    data-sf="active">Active</button>
+  <div class="filter-sep"></div>
+  <button class="fpill on" data-tf="4">4h</button>
+  <button class="fpill"    data-tf="all">All time</button>
+</div>
+
+<div class="section-tabs">
+  <button class="stab on" data-tab="incidents">Incidents</button>
+  <button class="stab"    data-tab="chat">Chat</button>
+</div>
+
+<div class="section" id="incidents-section">
+  <div class="section-title" id="incidents-title">Active Incidents</div>
+  <div id="incidents"><div class="empty">Loading…</div></div>
+</div>
+
+<div class="section" id="chat-section" style="display:none">
+  <div class="section-title">Radio Traffic</div>
+  <div id="feed"></div>
+</div>
+
+<div class="footer">Tippecanoe County public safety radio · unencrypted P25</div>
+</div><!-- #scroll-pane -->
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API = '/api/public';
+let lastUpdated = null;
+let _map = null;
+let _markers = {};
+let _allIncidents = [];
+let _statusFilter = 'all';   // 'all' | 'active'
+let _timeFilter   = '4';     // 'all' | '4'
+
+// ── Leaflet map init ──────────────────────────────────────────────────────────
+function initMap() {
+  _map = L.map('map', {
+    center: [40.4167, -86.8753],
+    zoom: 11,
+    zoomControl: true,
+  });
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap, © CARTO',
+    maxZoom: 18,
+  }).addTo(_map);
+}
+
+function pinColor(kind) {
+  if (kind === 'active') return '#f85149';
+  if (kind === 'watch')  return '#d29922';
+  return '#484f58';
+}
+
+function makeIcon(kind) {
+  const c = pinColor(kind);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14">
+    <circle cx="7" cy="7" r="6" fill="${c}" stroke="rgba(255,255,255,.4)" stroke-width="1.5"/>
+  </svg>`;
+  return L.divIcon({
+    html: svg, className: '', iconSize: [14, 14], iconAnchor: [7, 7], popupAnchor: [0, -9],
+  });
+}
+
+function updateMap(incidents) {
+  if (!_map) return;
+  const withCoords = incidents.filter(i => i.lat != null && i.lng != null);
+  const ids = new Set(withCoords.map(i => String(i.number)));
+
+  // Remove stale markers
+  for (const id of Object.keys(_markers)) {
+    if (!ids.has(id)) { _markers[id].remove(); delete _markers[id]; }
+  }
+
+  for (const inc of withCoords) {
+    const id = String(inc.number);
+    const popup = `
+      <div class="popup-title">${esc(inc.title)}</div>
+      <div class="popup-meta">${esc(inc.agency)}${inc.location && inc.location !== 'Unknown' ? ' · ' + esc(inc.location) : ''}</div>
+      <span class="popup-status ${esc(inc.status_kind)}">${esc(inc.status)}</span>
+      <div style="margin-top:7px">
+        <a href="#" onclick="scrollToIncident(${inc.number});return false"
+           style="font-size:11px;font-weight:600">Details →</a>
+      </div>`;
+
+    if (_markers[id]) {
+      _markers[id].setLatLng([inc.lat, inc.lng]);
+      _markers[id].setIcon(makeIcon(inc.status_kind));
+      _markers[id].getPopup()?.setContent(popup);
+    } else {
+      const m = L.marker([inc.lat, inc.lng], { icon: makeIcon(inc.status_kind) })
+        .bindPopup(popup)
+        .addTo(_map);
+      _markers[id] = m;
+    }
+  }
+}
+
+function scrollToIncident(num) {
+  // Switch to incidents tab first
+  document.querySelectorAll('.stab[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === 'incidents'));
+  document.getElementById('incidents-section').style.display = '';
+  document.getElementById('chat-section').style.display = 'none';
+
+  const el = document.querySelector(`.incident[data-num="${num}"]`);
+  if (!el) return;
+  requestAnimationFrame(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  el.classList.add('highlighted');
+  setTimeout(() => el.classList.remove('highlighted'), 3500);
+  const det = document.getElementById(`det-${num}`);
+  if (det && !det.classList.contains('open')) {
+    det.classList.add('open');
+    const btn = det.nextElementSibling;
+    if (btn) btn.textContent = '▾ details';
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function age(ts) {
+  if (!ts) return '';
+  let d = parseDate(ts, 'yyyy-MM-dd HH:mm:ss') || parseDate(ts, 'HH:mm:ss');
+  if (!d) return ts;
+  const s = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+  if (s < 60)   return 'just now';
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  return `${Math.floor(s/3600)}h ago`;
+}
+
+function parseDate(s, fmt) {
+  if (fmt === 'yyyy-MM-dd HH:mm:ss') {
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (!m) return null;
+    return new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
+  }
+  const m = s.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), +m[1], +m[2], +m[3]);
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderLinks(text) {
+  const re = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    out += esc(text.slice(last, m.index));
+    out += `<a href="${esc(m[2])}" target="_blank" rel="noopener">${esc(m[1])}</a>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(text.slice(last));
+}
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+function filterIncidents(incidents) {
+  return incidents.filter(i => {
+    if (_statusFilter === 'active' && (i.status_kind === 'clear' || i.is_stale)) return false;
+    if (_timeFilter === '4' && i.last_seen) {
+      const d = parseDate(i.last_seen, 'yyyy-MM-dd HH:mm:ss') || parseDate(i.last_seen, 'HH:mm:ss');
+      if (d && (Date.now() - d.getTime()) > 4 * 3600 * 1000) return false;
+    }
+    return true;
+  });
+}
+
+function rerender() {
+  const filtered = filterIncidents(_allIncidents);
+  document.getElementById('incidents').innerHTML = renderIncidents(filtered);
+  updateMap(filtered);
+}
+
+document.querySelectorAll('.stab[data-tab]').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.stab[data-tab]').forEach(b => b.classList.toggle('on', b === btn));
+    document.getElementById('incidents-section').style.display = btn.dataset.tab === 'incidents' ? '' : 'none';
+    document.getElementById('chat-section').style.display      = btn.dataset.tab === 'chat'      ? '' : 'none';
+  };
+});
+
+document.querySelectorAll('.fpill[data-sf]').forEach(btn => {
+  btn.onclick = () => {
+    _statusFilter = btn.dataset.sf;
+    document.querySelectorAll('.fpill[data-sf]').forEach(b => b.classList.toggle('on', b === btn));
+    rerender();
+  };
+});
+document.querySelectorAll('.fpill[data-tf]').forEach(btn => {
+  btn.onclick = () => {
+    _timeFilter = btn.dataset.tf;
+    document.querySelectorAll('.fpill[data-tf]').forEach(b => b.classList.toggle('on', b === btn));
+    rerender();
+  };
+});
+
+// ── Renderers ─────────────────────────────────────────────────────────────────
+function renderIncidents(incidents) {
+  const open   = incidents.filter(i => i.status_kind !== 'clear' && !i.is_stale);
+  const stale  = incidents.filter(i => i.status_kind !== 'clear' && i.is_stale);
+  const closed = incidents.filter(i => i.status_kind === 'clear');
+  const list   = [...open, ...stale, ...closed];
+
+  document.getElementById('incidents-title').textContent =
+    open.length ? `Active Incidents (${open.length})` : 'Incidents';
+
+  if (!list.length) return '<div class="empty">No incidents on board</div>';
+
+  return list.map(inc => {
+    const details = (inc.details || []).map(d => `<div class="inc-detail">${esc(d)}</div>`).join('');
+    const action  = inc.action ? `<div class="inc-action">${renderLinks(inc.action)}</div>` : '';
+    const hasExtra = details || action;
+    const mapLink  = inc.lat != null
+      ? ` <button class="toggle-btn" style="display:inline;padding:0 6px" onclick="flyTo(${inc.lat},${inc.lng},${inc.number})">🗺</button>` : '';
+    return `
+    <div class="incident" data-kind="${esc(inc.status_kind)}" data-num="${inc.number}">
+      <div class="inc-header">
+        <div class="inc-dot"></div>
+        <div class="inc-title">${esc(inc.title)}${mapLink}</div>
+        <div class="inc-age">${age(inc.last_seen)}</div>
+      </div>
+      <div class="inc-meta">
+        <span class="inc-badge">${esc(inc.agency)}</span>
+        ${inc.location && inc.location !== 'Unknown' ? `<span class="inc-badge">📍 ${esc(inc.location)}</span>` : ''}
+        <span class="inc-badge">${esc(inc.status)}</span>
+      </div>
+      ${hasExtra ? `<div class="inc-details" id="det-${inc.number}">${details}${action}</div>
+      <button class="toggle-btn" onclick="toggleDetails(${inc.number})">▸ details</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function flyTo(lat, lng, num) {
+  if (!_map) return;
+  _map.flyTo([lat, lng], 14, { duration: 0.8 });
+  _map.scrollIntoView?.();
+  document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
+  setTimeout(() => _markers[String(num)]?.openPopup(), 900);
+}
+
+function toggleDetails(num) {
+  const el = document.getElementById(`det-${num}`);
+  const btn = el?.nextElementSibling;
+  if (!el) return;
+  el.classList.toggle('open');
+  if (btn) btn.textContent = el.classList.contains('open') ? '▾ details' : '▸ details';
+}
+
+function renderFeed(txs) {
+  if (!txs?.length) return '<div class="empty">No recent traffic</div>';
+  return txs.map(tx => `
+    <div class="tx">
+      <div class="tx-meta">
+        <span class="tx-badge" data-trunk="${esc(tx.trunk||'')}">${
+          tx.trunk === 'tippecanoe' ? 'TC' : tx.trunk === 'safet' ? 'ST' : '?'}</span>
+        <span class="tx-tg">${esc(tx.talkgroup||'Unknown')}</span>
+        ${tx.wav_file
+          ? `<button class="tx-play" data-wav="${esc(tx.wav_file)}" onclick="toggleClip(this)">▶</button>`
+          : ''}
+        <span class="tx-time">${esc(tx.time||'')}</span>
+      </div>
+      ${tx.text ? `<div class="tx-text">${esc(tx.text)}</div>` : ''}
+    </div>`).join('');
+}
+
+// ── Poll ──────────────────────────────────────────────────────────────────────
+let _lastTxAgo = null;
+
+function updateRadioStatus(radioLive, lastTxAgo) {
+  const dot = document.getElementById('dot');
+  const label = document.getElementById('radio-status');
+  dot.classList.remove('live', 'stale', 'down');
+  if (radioLive) {
+    dot.classList.add('live');
+    label.textContent = lastTxAgo != null
+      ? `live · ${lastTxAgo < 60 ? 'just now' : Math.round(lastTxAgo / 60) + 'm ago'}`
+      : 'live';
+    label.style.color = '#3fb950';
+  } else if (lastTxAgo != null) {
+    dot.classList.add('stale');
+    const m = Math.round(lastTxAgo / 60);
+    label.textContent = `offline · last tx ${m < 60 ? m + 'm' : Math.round(m/60) + 'h'} ago`;
+    label.style.color = 'var(--watch)';
+  } else {
+    dot.classList.add('down');
+    label.textContent = 'no signal';
+    label.style.color = 'var(--muted)';
+  }
+  _lastTxAgo = lastTxAgo;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch(API, { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    _allIncidents = data.incidents || [];
+    rerender();
+    document.getElementById('feed').innerHTML = renderFeed(data.transmissions || []);
+    updateRadioStatus(data.radio_live, data.last_tx_ago);
+    lastUpdated = new Date();
+  } catch(e) {
+    document.getElementById('dot').classList.remove('live', 'stale');
+    document.getElementById('dot').classList.add('down');
+    document.getElementById('radio-status').textContent = 'unreachable';
+    document.getElementById('radio-status').style.color = 'var(--active)';
+  }
+}
+
+// ── Clip playback ─────────────────────────────────────────────────────────────
+let _clip = null;
+let _clipBtn = null;
+let _clipLoading = false;
+
+function _clipReset(btn) {
+  if (btn) { btn.textContent = '▶'; btn.classList.remove('playing', 'loading'); }
+}
+
+function toggleClip(btn) {
+  if (_clipLoading) return;
+  const wav = btn.dataset.wav;
+  if (_clip && !_clip.ended) {
+    _clip.pause(); _clip = null;
+    const prev = _clipBtn; _clipBtn = null; _clipReset(prev);
+    if (btn === prev) return;
+  }
+  _clipLoading = true;
+  _clipBtn = btn;
+  btn.textContent = '◌';
+  btn.classList.add('loading');
+  const audio = new Audio(`/api/public/clip/${encodeURIComponent(wav)}`);
+  _clip = audio;
+  audio.oncanplay = () => {
+    btn.classList.remove('loading');
+    btn.textContent = '⏹';
+    btn.classList.add('playing');
+    _clipLoading = false;
+  };
+  audio.onended = audio.onerror = () => {
+    _clip = null; const b = _clipBtn; _clipBtn = null; _clipReset(b); _clipLoading = false;
+  };
+  audio.load();
+  audio.play().catch(() => { _clipReset(btn); _clipBtn = null; _clipLoading = false; });
+}
+
+initMap();
+refresh();
+setInterval(refresh, 30000);
+setInterval(() => {
+  if (_lastTxAgo == null) return;
+  _lastTxAgo += 5;
+  updateRadioStatus(_lastTxAgo < 600, _lastTxAgo);
+}, 5000);
+</script>
+</body>
+</html>

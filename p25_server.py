@@ -12,7 +12,7 @@ from typing import AsyncGenerator, Set
 
 import anthropic
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -22,6 +22,7 @@ AUDIO_FIFO       = "/tmp/p25_audio.fifo"
 DB_FILE          = Path.home() / "op25_tippecanoe/p25_state.db"
 AUDIO_CLIPS_DIR  = Path.home() / "op25_tippecanoe/audio_clips"
 
+MYCASE_PROXY_BASE = os.environ.get("MYCASE_PROXY_BASE", "https://p25.sadbabyrabbit.com")
 USERNAME = os.environ.get("P25_USER", "p25")
 PASSWORD = os.environ.get("P25_PASSWORD", "scanner")
 SUMMARY_MARKER = "=== SUMMARY ==="
@@ -924,6 +925,21 @@ def _incident_is_stale(row_or_inc) -> bool:
     age = _incident_age_seconds(last_seen)
     return age is not None and age > STALE_INCIDENT_SECONDS
 
+def _auto_clear_stale_incidents(conn: sqlite3.Connection) -> int:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = conn.execute(
+        "SELECT number, last_seen, status_kind FROM incident_state WHERE status_kind != 'clear'"
+    ).fetchall()
+    cleared = 0
+    for row in rows:
+        if _incident_is_stale(row):
+            conn.execute(
+                "UPDATE incident_state SET status = 'CLEAR', status_kind = 'clear', updated_at = ? WHERE number = ?",
+                (now, row["number"]),
+            )
+            cleared += 1
+    return cleared
+
 def _incident_row_to_api(row: sqlite3.Row) -> dict:
     details = json.loads(row["details_json"] or "[]")
     age_seconds = _incident_age_seconds(row["last_seen"])
@@ -1035,6 +1051,94 @@ def ensure_state_ready() -> None:
 def get_entries():
     return JSONResponse(parse_log(), headers={"Cache-Control": "no-store"})
 
+@app.get("/api/transmissions", dependencies=[Depends(require_auth)])
+def get_transmissions(limit: int = 50, before_id: int = 0, after_id: int = 0, from_id: int = 0, to_id: int = 0):
+    limit = max(1, min(limit, 500))
+    with _db() as conn:
+        if from_id and to_id:
+            rows = conn.execute(
+                "SELECT * FROM transmissions WHERE id >= ? AND id <= ? ORDER BY id ASC",
+                (from_id, to_id),
+            ).fetchall()
+        elif before_id:
+            rows = conn.execute(
+                "SELECT * FROM transmissions WHERE id < ? ORDER BY id DESC LIMIT ?",
+                (before_id, limit),
+            ).fetchall()
+        elif after_id:
+            rows = conn.execute(
+                "SELECT * FROM transmissions WHERE id > ? ORDER BY id DESC LIMIT ?",
+                (after_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM transmissions ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    _trunk_re = re.compile(r"\[trunk:(\w+)\]")
+    result = []
+    for row in rows:
+        raw = row["raw_line"] or ""
+        m = _trunk_re.search(raw)
+        trunk = m.group(1) if m else None
+        entry: dict = {
+            "id": row["id"],
+            "time": row["time"],
+            "talkgroup": row["talkgroup"],
+            "agency": row["agency"],
+            "trunk": trunk,
+            "text": row["text"],
+        }
+        if row["wav_file"] and (AUDIO_CLIPS_DIR / row["wav_file"]).exists():
+            entry["wav_file"] = row["wav_file"]
+        result.append(entry)
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+_PUBLIC_CORS = {"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"}
+
+@app.get("/api/public")
+def public_state():
+    """No-auth, read-only snapshot of current incidents + recent radio traffic."""
+    with _db() as conn:
+        incidents = incident_rows_from_db(conn)
+        rows = conn.execute(
+            "SELECT id, time, talkgroup, agency, raw_line, text, wav_file FROM transmissions ORDER BY id DESC LIMIT 30"
+        ).fetchall()
+    _trunk_re2 = re.compile(r"\[trunk:(\w+)\]")
+    tx = []
+    for row in rows:
+        m = _trunk_re2.search(row["raw_line"] or "")
+        wav = row["wav_file"] if row["wav_file"] and (AUDIO_CLIPS_DIR / row["wav_file"]).exists() else None
+        tx.append({"id": row["id"], "time": row["time"], "talkgroup": row["talkgroup"],
+                   "agency": row["agency"], "trunk": m.group(1) if m else None,
+                   "text": row["text"], "wav_file": wav})
+    # Radio is "live" if the log file was written to in the last 10 minutes.
+    last_tx_ago = None
+    radio_live = False
+    if LOG_FILE.exists():
+        last_tx_ago = round(time.time() - LOG_FILE.stat().st_mtime)
+        radio_live = last_tx_ago < 600
+    return JSONResponse({"incidents": incidents, "transmissions": tx,
+                         "updated": datetime.now().isoformat(),
+                         "radio_live": radio_live,
+                         "last_tx_ago": round(last_tx_ago) if last_tx_ago is not None else None},
+                        headers=_PUBLIC_CORS)
+
+@app.get("/embed")
+def embed_page():
+    return FileResponse(STATIC / "embed.html", headers={"Cache-Control": "public, max-age=60"})
+
+@app.get("/api/public/clip/{filename}")
+def public_clip(filename: str):
+    """No-auth audio clip serving for the public embed page."""
+    safe = Path(filename).name
+    path = AUDIO_CLIPS_DIR / safe
+    if not path.exists() or not safe.endswith(".wav"):
+        raise HTTPException(404)
+    return FileResponse(path, media_type="audio/wav",
+                        headers={"Cache-Control": "public, max-age=3600",
+                                 "Access-Control-Allow-Origin": "*"})
+
 @app.get("/api/state", dependencies=[Depends(require_auth)])
 def get_state():
     ensure_state_ready()
@@ -1080,6 +1184,74 @@ def set_audio_filter(req: AudioFilterReq):
         raise HTTPException(400, detail="filter must be 'all', '0', or '1'")
     Path(AUDIO_FILTER_FILE).write_text(req.filter)
     return {"filter": req.filter}
+
+def _mycase_case_url(result: dict) -> str:
+    token = result.get("CaseToken", "")
+    payload = json.dumps({"v": {"CaseToken": token}}, separators=(",", ":"))
+    b64 = base64.b64encode(payload.encode()).decode()
+    return f"https://public.courts.in.gov/mycase/#/vw/CaseSummary/{b64}"
+
+def _mycase_results_html(first: str, last: str, results: list, total: int) -> str:
+    name = f"{first} {last}".strip()
+    rows = ""
+    for r in results:
+        url = _mycase_case_url(r)
+        num = r.get("CaseNumber", "")
+        style = r.get("Style", "")
+        charges = r.get("Charges") or ""
+        rows += f'<li><a href="{url}">{num}</a> &mdash; {style}' + (f' <small>({charges})</small>' if charges else '') + '</li>\n'
+    summary = f"{total} case{'s' if total != 1 else ''} found" if results else "No cases found"
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MyCase: {name}</title>
+<style>
+body{{font-family:system-ui,-apple-system,sans-serif;padding:1.2rem;max-width:640px;margin:auto;color:#1a1a1a}}
+h2{{font-size:1.1rem;margin-bottom:.4rem}}
+p{{color:#555;font-size:.9rem;margin:.3rem 0}}
+ul{{padding-left:1.2rem;margin-top:.8rem}}
+li{{margin:.5rem 0;line-height:1.4}}
+a{{color:#0057b8;text-decoration:none}}
+a:hover{{text-decoration:underline}}
+small{{color:#666}}
+</style>
+</head><body>
+<h2>MyCase: {name}</h2>
+<p>{summary}</p>
+<ul>{rows}</ul>
+<p style="margin-top:1rem;font-size:.8rem">
+<a href="https://public.courts.in.gov/mycase/#/qs/Search">Open MyCase Search</a>
+</p>
+</body></html>"""
+
+@app.get("/api/mycase")
+def mycase_search(first: str = "", last: str = ""):
+    first = first.strip(); last = last.strip()
+    if not first and not last:
+        raise HTTPException(400, detail="Provide first= and/or last= query params")
+    payload = json.dumps({
+        "Mode": "ByParty", "Last": last, "First": first,
+        "NewSearch": True, "CaptchaAnswer": None,
+        "Skip": 0, "Take": 10, "Sort": "CaseNumber ASC",
+    }).encode()
+    req = urllib.request.Request(
+        "https://public.courts.in.gov/mycase/Search/SearchCases",
+        data=payload,
+        headers={"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:
+        return HTMLResponse(
+            f"<h2>MyCase lookup failed</h2><p>{exc}</p>", status_code=502
+        )
+    results = data.get("Results") or []
+    total = data.get("TotalResults", 0)
+    if total == 1 and results:
+        return RedirectResponse(url=_mycase_case_url(results[0]), status_code=303)
+    return HTMLResponse(_mycase_results_html(first, last, results, total))
+
 
 @app.get("/")
 def index():
@@ -1176,7 +1348,7 @@ Use one markdown section per incident with this shape:
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
 - Location: pure mappable address/place only, or Unknown. Do not add context, explanations, parentheticals, routes, or "near..." guesses here.
 - Details: concise update
-- Action: what remains unresolved or what to watch for
+- Action: what remains unresolved or what to watch for. REQUIRED: if a person's name (suspect, subject, driver, wanted person) was mentioned in the traffic, append a MyCase link using the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both the link text and query params.
 
 Incident numbers are persistent identifiers. Use only integers, never letters. \
 Reuse an existing incident number when updating the same real-world incident. \
@@ -1232,8 +1404,6 @@ existing incident number.
 CRITICAL — incident clearance: Actively review every incident in the existing board. \
 Mark incidents CLEAR when: units return to service (10-8, available), dispatch says disregard (10-22), \
 scene cleared, transport completed, or log shows no follow-up activity. \
-Incidents marked STALE (4+ hours with no traffic) MUST be marked CLEAR unless there is explicit \
-ongoing evidence in the log. Do not carry forward stale ACTIVE status — if in doubt, mark CLEAR. \
 A brief mention with no callback or follow-up = CLEAR. Short-duration calls (stops, minor accidents, \
 medical assists, welfare checks) resolve in minutes unless the log shows otherwise.
 
@@ -1248,7 +1418,7 @@ Use one markdown section per incident:
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
 - Location: pure mappable address/place only, or Unknown
 - Details: concise full-arc update
-- Action: what remains unresolved or what to watch for
+- Action: what remains unresolved or what to watch for. REQUIRED: if a person's name (suspect, subject, driver, wanted person) was mentioned, append a MyCase link using the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both the link text and query params.
 
 Chunk summaries:
 {block}
@@ -1274,15 +1444,13 @@ Return JSON only, with no markdown and no preamble. The JSON shape is:
       "status": "ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING",
       "location": "pure mappable address/place only, or Unknown",
       "details": ["one short fact from the new transmissions", "optional second short fact"],
-      "action": "what remains unresolved or what to watch for"
+      "action": "what remains unresolved or what to watch for. If a person's name (suspect, subject, driver, wanted person) was mentioned, append a MyCase link: [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both label and query params."
     }}
   ]
 }}
 
 Rules:
 - Include incidents directly mentioned or updated by the new transmissions.
-- ALSO include any incident from the existing board marked STALE (no traffic in 4+ hours): mark it CLEAR
-  unless the new transmissions contain activity directly related to it. Do not leave stale incidents ACTIVE.
 - Reuse an existing incident number for the same real-world incident.
 - For a new incident, assign the next unused integer after the highest existing incident number.
 - Use only integer incident numbers, never letters.
@@ -1293,6 +1461,7 @@ Rules:
   the log shows ongoing activity.
 - Location must be a pure mappable address/place only, or Unknown. Put uncertainty and context in details.
 - Keep each incident concise: at most two details.
+- IMPORTANT: When a person's name appears in the transmissions, you MUST include a MyCase link in the action field. Use the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) with the real name in both the label and the query params.
 - If there are no incident updates, return {{"incidents":[]}}.
 """
 
@@ -1524,6 +1693,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
             created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             mode = "expensive" if req.expensive else ("fast" if req.fast else "incremental")
             with _db() as conn:
+                _auto_clear_stale_incidents(conn)
                 current_incidents = incident_rows_from_db(conn)
                 incident_context = incident_board_context_from_incidents(current_incidents)
                 cur = conn.execute(
@@ -1539,7 +1709,13 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
             if req.expensive:
                 prompt = (
                     "Use web_search to silently look up any Lafayette/Tippecanoe address, business, "
-                    "or landmark you are uncertain about. Do not narrate searches.\n\n" + prompt
+                    "or landmark you are uncertain about. Do not narrate searches.\n"
+                    "When a specific person's name (suspect, subject, driver, wanted person, etc.) is mentioned "
+                    "in the radio traffic, include a pre-filled Indiana MyCase court records search link in the "
+                    "action field using this exact format (substitute real names): "
+                    "`[MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname)` "
+                    "— put the real first name in the first= param and last name in last=. "
+                    "Only add links for specific named individuals, not generic descriptions.\n\n" + prompt
                 )
             model = "claude-haiku-4-5-20251001" if req.fast else "claude-sonnet-4-6"
             try:

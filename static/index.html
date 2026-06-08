@@ -124,6 +124,11 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .tx-play-btn { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 14px; padding: 0 2px; line-height: 1; transition: color 0.15s; }
 .tx-play-btn:hover { color: var(--text); }
 .tx-play-btn.playing { color: var(--police); }
+.tx-play-btn.loading { color: var(--muted); pointer-events: none; animation: spin .7s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#audio-ch-select { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 11px; font-weight: 700; padding: 2px 4px; cursor: pointer; outline: none; }
+#audio-btn.loading { pointer-events: none; animation: spin .7s linear infinite; }
+#audio-btn.active { color: var(--police); border-color: var(--police); }
 .tg-badge { font-size: 11px; font-weight: 600; border-radius: 4px; padding: 2px 7px; }
 .tg-badge[data-agency="police"] { background: rgba(59,130,246,.2);  color: var(--police); }
 .tg-badge[data-agency="fire"]   { background: rgba(239,68,68,.2);   color: var(--fire);   }
@@ -417,6 +422,11 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <button class="view-tab" data-view="map">Map</button>
       </div>
       <div class="icon-group">
+        <select id="audio-ch-select" title="Audio channel">
+          <option value="all">All</option>
+          <option value="0">TC</option>
+          <option value="1">ST</option>
+        </select>
         <button class="icon-btn" id="audio-btn" title="Listen live">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
@@ -457,8 +467,13 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   <div id="map-view">
     <div id="leaflet-map"></div>
     <div class="map-filter-bar">
-      <button class="map-filter-btn active" data-mf-status="live">Live</button>
-      <button class="map-filter-btn" data-mf-status="all">All</button>
+      <button class="map-filter-btn" data-mf-status="live">Active</button>
+      <button class="map-filter-btn active" data-mf-status="all">All</button>
+      <div class="map-filter-sep"></div>
+      <button class="map-filter-btn" data-mf-hours="">All</button>
+      <button class="map-filter-btn active" data-mf-hours="4">4h</button>
+      <button class="map-filter-btn" data-mf-hours="12">12h</button>
+      <button class="map-filter-btn" data-mf-hours="24">24h</button>
     </div>
     <div class="map-status-bar" id="map-status-bar"></div>
   </div>
@@ -917,7 +932,7 @@ function openIncidentModal(number) {
   document.getElementById('incident-modal-title').textContent = title;
   document.getElementById('incident-modal-location').innerHTML = incident.location ? mapLocationHtml(incident.location) : 'Unknown';
   document.getElementById('incident-modal-agency').textContent = incident.agency || 'Unknown';
-  document.getElementById('incident-modal-action').textContent = incident.action || 'None';
+  document.getElementById('incident-modal-action').innerHTML = renderInlineMarkdown(incident.action || 'None');
   const timesRow = document.getElementById('incident-modal-times-row');
   const timesEl = document.getElementById('incident-modal-times');
   if (incident.first_seen || incident.last_seen) {
@@ -993,7 +1008,15 @@ document.addEventListener('keydown', e => {
 });
 
 function renderInlineMarkdown(text) {
-  return escHtml(text)
+  const linkRe = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
+  let out = '', last = 0, m;
+  while ((m = linkRe.exec(text)) !== null) {
+    out += escHtml(text.slice(last, m.index));
+    out += `<a href="${escAttr(m[2])}" target="_blank" rel="noopener">${escHtml(m[1])}</a>`;
+    last = m.index + m[0].length;
+  }
+  out += escHtml(text.slice(last));
+  return out
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>');
 }
@@ -1155,6 +1178,7 @@ document.querySelectorAll('.filter-tab[data-filter]').forEach(btn => {
     btn.classList.add('active');
     filter = btn.dataset.filter;
     renderFeed();
+    renderMap();
   };
 });
 
@@ -1169,6 +1193,7 @@ document.querySelectorAll('.filter-tab[data-trunk]').forEach(btn => {
     btn.classList.add('active');
     trunkFilter = btn.dataset.trunk;
     renderFeed();
+    renderMap();
   };
 });
 
@@ -1443,6 +1468,16 @@ document.getElementById('download-btn').onclick = async () => {
 };
 
 // ── Audio channel filter ──────────────────────────────────────────────────────
+(async () => {
+  try {
+    const r = await fetch('/api/audio-filter', { headers: authHeader(), cache: 'no-store' });
+    if (r.ok) { const { filter } = await r.json(); document.getElementById('audio-ch-select').value = filter; }
+  } catch(_) {}
+})();
+document.getElementById('audio-ch-select').onchange = async function() {
+  await fetch('/api/audio-filter', { method: 'POST', headers: { ...authHeader(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filter: this.value }) });
+};
 
 // ── Map filters ───────────────────────────────────────────────────────────────
 document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(btn => {
@@ -1454,19 +1489,33 @@ document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(btn => {
   };
 });
 
+document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(btn => {
+  btn.onclick = () => {
+    _mapFilterHours = btn.dataset.mfHours === '' ? null : Number(btn.dataset.mfHours);
+    document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
+      b.classList.toggle('active', b === btn));
+    renderMap();
+  };
+});
+
 // ── Live audio ────────────────────────────────────────────────────────────────
 let _audioEl = null;
+let _audioLoading = false;
 
 document.getElementById('audio-btn').onclick = async () => {
   const btn = document.getElementById('audio-btn');
+  if (_audioLoading) return;
   if (_audioEl) {
     _audioEl.pause();
     _audioEl.src = '';
     _audioEl = null;
-    btn.style.color = '';
+    btn.classList.remove('active');
     btn.title = 'Listen live';
     return;
   }
+  _audioLoading = true;
+  btn.classList.add('loading');
+  btn.title = 'Connecting…';
   try {
     let token;
     if (typeof TOKEN !== 'undefined' && TOKEN) {
@@ -1479,32 +1528,46 @@ document.getElementById('audio-btn').onclick = async () => {
     _audioEl = new Audio(`/api/audio?t=${encodeURIComponent(token)}`);
     _audioEl.onended = _audioEl.onerror = () => {
       _audioEl = null;
-      btn.style.color = '';
+      btn.classList.remove('active');
       btn.title = 'Listen live';
     };
     await _audioEl.play();
-    btn.style.color = 'var(--police)';
+    btn.classList.add('active');
     btn.title = 'Stop listening';
   } catch (e) {
-    alert('Audio failed: ' + e.message);
+    btn.classList.remove('active');
+    btn.title = 'Listen live';
+    console.error('Audio failed:', e);
+  } finally {
+    _audioLoading = false;
+    btn.classList.remove('loading');
   }
 };
 
 // ── Audio clip playback ───────────────────────────────────────────────────────
 let _clipEl = null;
 let _clipBtn = null;
+let _clipLoading = false;
+
+function _clipReset(btn) {
+  if (btn) { btn.textContent = '▶'; btn.classList.remove('playing', 'loading'); }
+}
 
 async function playClip(filename, btn) {
+  if (_clipLoading) return;
   if (_clipEl && !_clipEl.ended) {
     _clipEl.pause();
     _clipEl = null;
-    if (_clipBtn) { _clipBtn.textContent = '▶'; _clipBtn.classList.remove('playing'); }
-    if (btn === _clipBtn) { _clipBtn = null; return; }
+    const prev = _clipBtn;
+    _clipBtn = null;
+    _clipReset(prev);
+    if (btn === prev) return;
   }
+  _clipLoading = true;
   _clipBtn = btn;
+  btn.textContent = '◌';
+  btn.classList.add('loading');
   try {
-    // Get a short-lived token first, then construct the URL and call play()
-    // within the same async chain so the browser honors the user gesture.
     const tr = await fetch('/api/audio/token', { headers: authHeader(), cache: 'no-store' });
     if (!tr.ok) throw new Error('token');
     const { token } = await tr.json();
@@ -1512,14 +1575,19 @@ async function playClip(filename, btn) {
     _clipEl = new Audio(url);
     _clipEl.onended = _clipEl.onerror = () => {
       _clipEl = null;
-      if (_clipBtn) { _clipBtn.textContent = '▶'; _clipBtn.classList.remove('playing'); _clipBtn = null; }
+      const b = _clipBtn; _clipBtn = null;
+      _clipReset(b);
     };
     await _clipEl.play();
+    btn.classList.remove('loading');
     btn.textContent = '⏹';
     btn.classList.add('playing');
   } catch(e) {
-    if (_clipBtn) { _clipBtn.textContent = '▶'; _clipBtn.classList.remove('playing'); _clipBtn = null; }
-    console.error('Clip playback failed:', e);
+    const b = _clipBtn; _clipBtn = null;
+    _clipReset(b);
+    if (e.name !== 'AbortError') console.error('Clip playback failed:', e);
+  } finally {
+    _clipLoading = false;
   }
 }
 
@@ -1604,7 +1672,8 @@ document.getElementById('share-modal').addEventListener('click', e => {
 let _leafletLoaded = false;
 let _map           = null;
 let _mapMarkers    = {};   // incident number → Leaflet marker
-let _mapFilterStatus = 'live';     // 'live' | 'all'
+let _mapFilterStatus = 'all';      // 'live' | 'all'
+let _mapFilterHours  = 4;          // null = no time limit | 4 | 12 | 24
 
 const LAFAYETTE_LL  = [40.4167, -86.8753];
 const MAP_STATUS_COLORS = {
@@ -1666,10 +1735,30 @@ function _updateMapStatus(count) {
     : 'No active incidents with locations';
 }
 
+function _mapAgencyMatch(agency) {
+  const a = (agency || '').toUpperCase();
+  if (filter === 'police') return /LPD|WLPD|TCSD|PUPD|ISP|SHERIFF|POLICE/.test(a);
+  if (filter === 'fire')   return /LFD|WLFD|TCFD|PUFD|FIRE/.test(a);
+  if (filter === 'ems')    return /EMS|TEAS/.test(a);
+  return true;
+}
+function _mapTrunkMatch(agency) {
+  if (trunkFilter === 'all') return true;
+  const a = (agency || '').toUpperCase();
+  const isSafet = /\bISP\b|INDOT/.test(a);
+  if (trunkFilter === 'safet')      return isSafet;
+  if (trunkFilter === 'tippecanoe') return !isSafet;
+  return true;
+}
 function _mapFilterMatch(i) {
   if (i.lat == null || i.lng == null) return false;
+  if (!_mapAgencyMatch(i.agency))  return false;
+  if (!_mapTrunkMatch(i.agency))   return false;
+  if (_mapFilterHours != null) {
+    const age = i.last_seen ? (Date.now() / 1000 - new Date(i.last_seen).getTime() / 1000) : Infinity;
+    if (age > _mapFilterHours * 3600) return false;
+  }
   if (_mapFilterStatus === 'all') return true;
-  // live: non-stale, non-clear
   return !i.is_stale && (i.status_kind || 'watch') !== 'clear';
 }
 
