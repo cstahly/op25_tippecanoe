@@ -1812,9 +1812,10 @@ function goToIncidentOnMap(number) {
   setView('map');
   initMap().then(() => {
     renderMap();
-    _map.setView([incident.lat, incident.lng], 15, { animate: true });
     const marker = _mapMarkers[String(incident.number)];
-    if (marker) marker.openPopup();
+    if (!marker) return;
+    _map.once('moveend', () => marker.openPopup());
+    _map.setView([incident.lat, incident.lng], 15, { animate: false });
   });
 }
 
