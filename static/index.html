@@ -355,6 +355,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                   cursor: pointer; white-space: nowrap; transition: all .15s; }
 .map-filter-btn.active { background: rgba(59,130,246,.18); border-color: var(--police);
                           color: var(--text); }
+.map-filter-btn.dimmed { opacity: .35; pointer-events: none; }
 .map-filter-sep { width: 1px; height: 16px; background: var(--border); flex-shrink: 0; }
 .leaflet-popup-content-wrapper { background: var(--surface); border: 1px solid var(--border);
                                   color: var(--text); border-radius: var(--radius); }
@@ -1486,6 +1487,18 @@ document.getElementById('audio-ch-select').onchange = async function() {
 };
 
 // ── Map filters ───────────────────────────────────────────────────────────────
+function _syncActiveFilterDim() {
+  const broad = _mapFilterHours == null || _mapFilterHours > 4;
+  const activeBtn = document.querySelector('.map-filter-btn[data-mf-status="live"]');
+  if (!activeBtn) return;
+  activeBtn.classList.toggle('dimmed', broad);
+  if (broad && _mapFilterStatus === 'live') {
+    _mapFilterStatus = 'all';
+    document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(b =>
+      b.classList.toggle('active', b.dataset.mfStatus === 'all'));
+  }
+}
+
 document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(btn => {
   btn.onclick = () => {
     _mapFilterStatus = btn.dataset.mfStatus;
@@ -1500,6 +1513,7 @@ document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(btn => {
     _mapFilterHours = btn.dataset.mfHours === '' ? null : Number(btn.dataset.mfHours);
     document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
       b.classList.toggle('active', b === btn));
+    _syncActiveFilterDim();
     renderMap();
   };
 });
@@ -1803,6 +1817,7 @@ function goToIncidentOnMap(number) {
     b.classList.toggle('active', b.dataset.mfStatus === 'all'));
   document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
     b.classList.toggle('active', b.dataset.mfHours === ''));
+  _syncActiveFilterDim();
   document.querySelectorAll('[data-filter]').forEach(b =>
     b.classList.toggle('active', b.dataset.filter === 'all'));
   document.querySelectorAll('[data-trunk]').forEach(b =>
