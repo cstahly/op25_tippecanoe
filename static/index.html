@@ -1817,7 +1817,7 @@ function goToIncidentOnMap(number) {
     b.classList.toggle('active', b.dataset.mfStatus === 'all'));
   document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
     b.classList.toggle('active', b.dataset.mfHours === ''));
-  _syncActiveFilterDim();
+  try { _syncActiveFilterDim(); } catch(_) {}
   document.querySelectorAll('[data-filter]').forEach(b =>
     b.classList.toggle('active', b.dataset.filter === 'all'));
   document.querySelectorAll('[data-trunk]').forEach(b =>
@@ -1826,9 +1826,8 @@ function goToIncidentOnMap(number) {
   document.getElementById('incident-modal').classList.remove('open');
   setView('map', false, () => {
     const marker = _mapMarkers[String(incident.number)];
-    if (!marker) return;
     _map.setView([incident.lat, incident.lng], 15, { animate: false });
-    marker.openPopup();
+    if (marker) marker.openPopup();
   });
 }
 
