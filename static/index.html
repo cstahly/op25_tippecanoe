@@ -849,7 +849,7 @@ function makeIncidentCard(incident) {
     </div>
     <div class="incident-details">${details || '<div class="incident-detail">Awaiting a cleaner summary update.</div>'}</div>`;
   card.onclick = () => openIncidentModal(incident.number);
-  card.querySelectorAll('a').forEach(a => a.onclick = e => e.stopPropagation());
+  card.querySelectorAll('a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
   if (hasTxAnchor) {
     card.querySelector('.incident-log-link').onclick = (e) => {
       e.preventDefault();
@@ -918,7 +918,7 @@ function mapLocationHtml(text, incidentNumber) {
   if (incidentNumber != null) {
     const inc = findIncident(incidentNumber);
     if (inc && inc.lat != null && inc.lng != null) {
-      return `<a class="map-link" href="#" onclick="goToIncidentOnMap(${Number(incidentNumber)});return false">${safe}</a>`;
+      return `<a class="map-link" href="javascript:void(0)" onclick="goToIncidentOnMap(${Number(incidentNumber)})">${safe}</a>`;
     }
   }
   return `<a class="map-link" href="${mapSearchUrl(text)}" target="_blank" rel="noopener noreferrer">${safe}</a>`;
@@ -1808,6 +1808,7 @@ function goToIncidentOnMap(number) {
   document.querySelectorAll('[data-trunk]').forEach(b =>
     b.classList.toggle('active', b.dataset.trunk === 'all'));
 
+  document.getElementById('incident-modal').classList.remove('open');
   setView('map');
   initMap().then(() => {
     renderMap();
