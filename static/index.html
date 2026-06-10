@@ -595,7 +595,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v40';
+const APP_VERSION = 'v41';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -1912,13 +1912,19 @@ function _startUserLocation(zoomNow) {
 function _markerFor(incident, lat, lng) {
   const title  = incident.number ? `#${incident.number} ${incident.title || ''}` : (incident.title || 'Incident');
   const marker = L.circleMarker([lat, lng], _markerStyle(incident));
+  const prio = incident.priority || 3;
+  const times = [incident.first_seen && `First: ${incident.first_seen}`,
+                 incident.last_seen  && `Last: ${incident.last_seen}`].filter(Boolean).join(' · ');
+  const details = (incident.details || []).slice(0, 2)
+    .map(d => `<div class="map-popup-sub">• ${escHtml(d)}</div>`).join('');
   const popupHtml = `
-    <div class="map-popup-title">${escHtml(title)}</div>
-    <div class="map-popup-sub">${escHtml(incident.status || 'WATCH')} · ${escHtml(incident.agency || '')}</div>
+    <div class="map-popup-title">${priorityBadgeHtml(prio)} ${escHtml(title)}</div>
+    <div class="map-popup-sub">${escHtml(incident.status || 'ACTIVE')} · ${escHtml(incident.agency || '')}</div>
     <div class="map-popup-sub">${escHtml(incident.location || '')}</div>
-    ${incident.first_seen ? `<div class="map-popup-sub" style="margin-bottom:8px">First: ${escHtml(incident.first_seen)}</div>` : '<div style="margin-bottom:8px"></div>'}
-    <button class="map-popup-btn" onclick="goToIncidentCard(${Number(incident.number)})">Details</button>`;
-  marker.bindPopup(popupHtml, { maxWidth: 260 });
+    ${details}
+    ${times ? `<div class="map-popup-sub" style="margin-bottom:8px">${escHtml(times)}</div>` : '<div style="margin-bottom:8px"></div>'}
+    <button class="map-popup-btn" onclick="openIncidentModal(${Number(incident.number)})">Full details</button>`;
+  marker.bindPopup(popupHtml, { maxWidth: 300 });
   return marker;
 }
 
