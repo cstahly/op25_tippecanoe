@@ -341,7 +341,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 
 /* ── Map view ── */
 #map-view { flex: 1; display: none; position: relative; min-height: 0; }
-#leaflet-map { position: absolute; inset: 0; }
+#leaflet-map { position: absolute; inset: 0; touch-action: none; }
+.leaflet-locate-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-size: 18px; width: 30px; height: 30px; cursor: pointer; display: flex;
+  align-items: center; justify-content: center; margin-top: 4px; }
+.leaflet-locate-btn:hover { background: var(--border); }
+.leaflet-locate-btn.tracking { color: #3b82f6; border-color: #3b82f6; }
 .map-status-bar { position: absolute; bottom: 24px; right: 8px; z-index: 1000;
                   background: rgba(13,17,23,.88); border: 1px solid var(--border);
                   border-radius: 6px; color: var(--muted); font-size: 11px;
@@ -573,7 +578,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v26';
+const APP_VERSION = 'v28';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -1128,10 +1133,52 @@ async function syncEntries() {
   }
 }
 
+let _sseAbort     = null;
+let _sseSyncTimer = null;
+
+function _scheduleSync() {
+  if (_sseSyncTimer) return;
+  _sseSyncTimer = setTimeout(() => { _sseSyncTimer = null; syncEntries(); }, 400);
+}
+
+async function startSSE() {
+  if (_sseAbort) return;
+  const ctrl = new AbortController();
+  _sseAbort = ctrl;
+  try {
+    const resp = await fetch('/api/stream', { headers: authHeader(), signal: ctrl.signal });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+    const reader = resp.body.getReader();
+    const dec    = new TextDecoder();
+    let   buf    = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        try {
+          const ev = JSON.parse(line.slice(5).trim());
+          if (ev.type === 'tx') _scheduleSync();
+        } catch(_) {}
+      }
+    }
+  } catch(e) {
+    if (e.name !== 'AbortError') {
+      _sseAbort = null;
+      setTimeout(startSSE, 8000);
+    }
+  }
+}
+
 function startPolling() {
   if (pollingStarted) return;
   pollingStarted = true;
-  setInterval(syncEntries, 2000);
+  startSSE();
+  setInterval(syncEntries, 30000);  // fallback in case SSE is quiet
 }
 
 function currentUsername() {
@@ -1724,14 +1771,87 @@ function _loadLeaflet() {
   });
 }
 
+let _userMarker  = null;
+let _userCircle  = null;
+let _userWatcher = null;
+let _userFirstFix = true;
+let _locateBtn   = null;
+
 async function initMap() {
   await _loadLeaflet();
-  if (_map) { _map.invalidateSize(); return; }
-  _map = L.map('leaflet-map', { center: LAFAYETTE_LL, zoom: 12, zoomControl: true });
+  if (_map) {
+    requestAnimationFrame(() => _map.invalidateSize());
+    return;
+  }
+  const _savedView = (() => { try { return JSON.parse(localStorage.getItem('p25_map_view')); } catch(_){} return null; })();
+  const _initCenter = _savedView ? [_savedView.lat, _savedView.lng] : LAFAYETTE_LL;
+  const _initZoom   = _savedView ? _savedView.zoom : 12;
+  _map = L.map('leaflet-map', { center: _initCenter, zoom: _initZoom, zoomControl: true });
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     maxZoom: 19,
   }).addTo(_map);
+
+  _map.on('moveend zoomend', () => {
+    const c = _map.getCenter();
+    try { localStorage.setItem('p25_map_view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: _map.getZoom() })); } catch(_) {}
+  });
+
+  // Locate button
+  const LocateCtrl = L.Control.extend({ onAdd() {
+    const btn = L.DomUtil.create('button', 'leaflet-locate-btn');
+    btn.innerHTML = '◎';
+    btn.title = 'My location';
+    _locateBtn = btn;
+    L.DomEvent.on(btn, 'click', L.DomEvent.stopPropagation);
+    L.DomEvent.on(btn, 'click', () => {
+      if (_userMarker) {
+        _map.setView(_userMarker.getLatLng(), 15, { animate: true });
+        btn.classList.add('tracking');
+        setTimeout(() => btn.classList.remove('tracking'), 1200);
+      } else {
+        _startUserLocation(true);
+      }
+    });
+    return btn;
+  }});
+  new LocateCtrl({ position: 'topleft' }).addTo(_map);
+
+  _startUserLocation(false);
+}
+
+function _startUserLocation(zoomNow) {
+  if (!navigator.geolocation) return;
+  if (_userWatcher != null) {
+    if (zoomNow && _userMarker) _map.setView(_userMarker.getLatLng(), 15, { animate: true });
+    return;
+  }
+  _userWatcher = navigator.geolocation.watchPosition(pos => {
+    const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+    if (!_map) return;
+    if (!_userMarker) {
+      _userCircle = L.circle([lat, lng], {
+        radius: accuracy, color: '#3b82f6', fillColor: '#3b82f6',
+        fillOpacity: 0.1, weight: 1,
+      }).addTo(_map);
+      _userMarker = L.circleMarker([lat, lng], {
+        radius: 7, fillColor: '#3b82f6', color: '#fff', weight: 2, fillOpacity: 1,
+      }).bindTooltip('You', { permanent: false }).addTo(_map);
+      if (_userFirstFix) {
+        _userFirstFix = false;
+        _map.setView([lat, lng], 14, { animate: true });
+      }
+    } else {
+      _userMarker.setLatLng([lat, lng]);
+      _userCircle.setLatLng([lat, lng]);
+      _userCircle.setRadius(accuracy);
+    }
+    if (zoomNow) {
+      _map.setView([lat, lng], 15, { animate: true });
+      zoomNow = false;
+    }
+  }, err => console.warn('Geolocation:', err),
+    { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
 }
 
 function _markerFor(incident, lat, lng) {
