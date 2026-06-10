@@ -1568,8 +1568,14 @@ Use "possibly related" when the link is an inference rather than explicit. Do no
 most incidents have none. At most two Related references per incident.
 
 Do not use any tools; answer directly from the transcript provided here.
-Output only the final incident sections. Do not include preamble, analysis narration, \
-or phrases like "I'll analyze", "I'll work through", "let me", or "now I have enough".
+
+Produce the complete current incident list for the whole session: one section for EVERY incident — \
+including incidents that resolved earlier in the session, minor incidents, and incidents carried on \
+the existing board with no new traffic in the transcript (carry those forward, updating status per \
+the clearance rules, rather than dropping them). Be comprehensive; do not skip incidents because \
+they are cleared, small, or already known.
+Output nothing except incident sections — no preamble, no analysis narration, \
+no phrases like "I'll analyze", "I'll work through", "let me", or "now I have enough".
 
 Use one markdown section per incident:
 ### INCIDENT 12: Short incident title
