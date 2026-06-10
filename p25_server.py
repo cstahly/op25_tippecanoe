@@ -925,8 +925,10 @@ def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
         conn.execute("DELETE FROM transmissions")
         existing = 0
     new_rows = rows[existing:]
+    # OR IGNORE: concurrent ensure_state_ready() calls race on the same new
+    # rows; ids are deterministic (log position) so dropping dupes is safe.
     conn.executemany(
-        "INSERT INTO transmissions(id, time, talkgroup, agency, text, wav_file, raw_line) VALUES(?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO transmissions(id, time, talkgroup, agency, text, wav_file, raw_line) VALUES(?, ?, ?, ?, ?, ?, ?)",
         new_rows,
     )
     return len(rows)
