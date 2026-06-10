@@ -595,7 +595,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v44';
+const APP_VERSION = 'v45';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -1805,12 +1805,18 @@ const MAP_STATUS_COLORS = {
   clear:   '#22c55e',
 };
 
+function _darkenHex(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const ch = v => Math.round(v * f).toString(16).padStart(2, '0');
+  return `#${ch((n >> 16) & 255)}${ch((n >> 8) & 255)}${ch(n & 255)}`;
+}
+
 function _markerStyle(incident) {
   const color = MAP_STATUS_COLORS[incident.status_kind || 'active'] || '#3b82f6';
   if (incident.is_stale) {
-    // Stale = full-strength fill, dashed white ring distinguishes from live
-    return { radius: 9, fillColor: color, color: '#fff', weight: 2,
-             opacity: 0.9, fillOpacity: 0.7, dashArray: '4,4' };
+    // Stale = same hue, visibly darker shade. Solid, not translucent.
+    return { radius: 9, fillColor: _darkenHex(color, 0.55), color: '#fff', weight: 2,
+             opacity: 0.9, fillOpacity: 0.9, dashArray: '4,4' };
   }
   return { radius: 10, fillColor: color, color: '#fff', weight: 2, opacity: 1, fillOpacity: 0.9 };
 }
