@@ -30,6 +30,7 @@ DEFAULT_SUMMARY_LIMIT = 0
 DEFAULT_SHARE_TOKEN_SECONDS = 14 * 24 * 60 * 60
 RATE_LIMITS: dict[str, float] = {}
 TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
+STALE_DISPLAY_SECONDS  = int(os.environ.get("P25_STALE_DISPLAY_SECONDS",  str(1 * 60 * 60)))
 STALE_INCIDENT_SECONDS = int(os.environ.get("P25_STALE_INCIDENT_SECONDS", str(4 * 60 * 60)))
 AUTO_SUMMARY_INTERVAL  = int(os.environ.get("P25_AUTO_SUMMARY_INTERVAL", str(2 * 60 * 60)))  # seconds
 
@@ -511,13 +512,11 @@ def _status_kind(status: str, text: str) -> str:
     if any(x in status_upper for x in ("EN ROUTE", "DISPATCHED", "ACTIVE", "PENDING", "AWAIT")):
         return "active"
     t = f"{status} {text}".upper()
-    if re.search(r'\bUNCLEAR\b', t):
-        return "watch"
     if re.search(r'\b(CLEAR|CLEARED|RESOLVED|AVAILABLE|CANCELLED|CANCELED)\b', t):
         return "clear"
     if any(x in t for x in ("EN ROUTE", "DISPATCHED", "ACTIVE", "PENDING", "AWAIT")):
         return "active"
-    return "watch"
+    return "active"
 
 def _extract_incidents_from_summary(entry: dict) -> list[dict]:
     text = entry.get("text", "")
@@ -563,7 +562,7 @@ def _extract_incidents_from_summary(entry: dict) -> list[dict]:
                 details.append(line)
         title = block["title"]
         blob = "\n".join([title, *body_lines])
-        status = fields.get("status", "WATCH")
+        status = fields.get("status", "ACTIVE")
         agency = fields.get("agency") or _agency_from_text(blob)
         number = block.get("number")
         incidents.append({
@@ -649,7 +648,7 @@ def derive_incidents(entries: list[dict]) -> list[dict]:
                 inc["recent_tx"]      = len(matching)
                 inc["last_tx_time"]   = max(t["time"] for t in matching)
 
-    priority = {"active": 0, "watch": 1, "routine": 2, "clear": 3}
+    priority = {"active": 0, "routine": 1, "clear": 2}
     ordered = sorted(merged.values(), key=lambda i: i.get("last_seen", ""), reverse=True)
     return sorted(ordered, key=lambda i: priority.get(i.get("status_kind", "watch"), 1))
 
@@ -663,7 +662,7 @@ def incident_board_context(entries: list[dict]) -> str:
     ]
     for inc in numbered:
         location = inc.get("location") or "Unknown"
-        status = inc.get("status") or "WATCH"
+        status = inc.get("status") or "ACTIVE"
         agency = inc.get("agency") or "Unknown"
         title = inc.get("title") or "Incident"
         lines.append(f"- INCIDENT {inc['number']}: {title} | {agency} | {status} | {location}")
@@ -701,7 +700,7 @@ def incident_board_context_from_incidents(incidents: list[dict]) -> str:
     ]
     for inc in selected:
         location = inc.get("location") or "Unknown"
-        status = inc.get("status") or "WATCH"
+        status = inc.get("status") or "ACTIVE"
         title = inc.get("title") or "Incident"
         stale = " | STALE" if inc.get("is_stale") else ""
         priority = inc.get("priority") or 3
@@ -899,7 +898,7 @@ def incident_rows_from_db(conn: sqlite3.Connection) -> list[dict]:
         "SELECT i.*, g.lat AS lat, g.lng AS lng FROM incident_state i "
         "LEFT JOIN geocode_cache g ON i.location = g.address "
         "ORDER BY "
-        "CASE i.status_kind WHEN 'active' THEN 0 WHEN 'watch' THEN 1 WHEN 'routine' THEN 2 WHEN 'clear' THEN 3 ELSE 1 END, "
+        "CASE i.status_kind WHEN 'active' THEN 0 WHEN 'routine' THEN 1 WHEN 'clear' THEN 2 ELSE 0 END, "
         "i.priority ASC, "
         "i.last_seen DESC"
     ).fetchall()
@@ -931,7 +930,7 @@ def _incident_is_stale(row_or_inc) -> bool:
         return False
     last_seen = row_or_inc["last_seen"] if isinstance(row_or_inc, sqlite3.Row) else row_or_inc.get("last_seen", "")
     age = _incident_age_seconds(last_seen)
-    return age is not None and age > STALE_INCIDENT_SECONDS
+    return age is not None and age > STALE_DISPLAY_SECONDS
 
 def _auto_clear_stale_incidents(conn: sqlite3.Connection) -> int:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -942,7 +941,7 @@ def _auto_clear_stale_incidents(conn: sqlite3.Connection) -> int:
     for row in rows:
         if _incident_is_stale(row):
             conn.execute(
-                "UPDATE incident_state SET status = 'CLEAR', status_kind = 'clear', updated_at = ? WHERE number = ?",
+                "UPDATE incident_state SET status = 'CLEAR', status_kind = 'clear', updated_at = ?, priority = MAX(priority, 4) WHERE number = ?",
                 (now, row["number"]),
             )
             cleared += 1
@@ -994,9 +993,12 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     if isinstance(details, str):
         details = [details]
     title = str(inc.get("title") or "Incident").strip()
-    status = str(inc.get("status") or "WATCH").strip()
+    status = str(inc.get("status") or "ACTIVE").strip()
     blob = "\n".join([title, status, *(str(d) for d in details)])
     priority = max(1, min(5, int(inc.get("priority") or 3)))
+    status_kind = _status_kind(status, blob)
+    if status_kind == "clear":
+        priority = max(priority, 4)
     row = conn.execute("SELECT first_seen, first_tx_id, last_tx_id FROM incident_state WHERE number = ?", (number,)).fetchone()
     first_seen = row["first_seen"] if row else now
     stored_first_tx_id = int(row["first_tx_id"]) if row and row["first_tx_id"] else 0
@@ -1026,7 +1028,7 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
             title,
             str(inc.get("agency") or "Unknown").strip(),
             status,
-            _status_kind(status, blob),
+            status_kind,
             str(inc.get("location") or "Unknown").strip(),
             json.dumps([str(d).strip() for d in details if str(d).strip()][:8]),
             str(inc.get("action") or "").strip(),
@@ -1369,7 +1371,7 @@ Use one markdown section per incident with this shape:
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
 - Location: pure mappable address/place only, or Unknown. Do not add context, explanations, parentheticals, routes, or "near..." guesses here.
 - Details: concise update
-- Priority: 1-5 urgency (1=critical/life-threatening/mass casualty, 2=serious/major incident, 3=moderate/standard, 4=non-urgent response, 5=routine traffic stop/minor call). Default is 3. Update if new traffic changes severity. Use the existing board value if no change.
+- Priority: 1-5 urgency (1=critical/life-threatening/mass casualty, 2=serious/major incident, 3=moderate/standard, 4=non-urgent response, 5=routine traffic stop/minor call). Default is 3. Update if new traffic changes severity. Use the existing board value if no change. When status is CLEAR, priority must be 4 or 5 — cleared incidents are never P1–P3.
 - Action: what remains unresolved or what to watch for. REQUIRED: if a person's name (suspect, subject, driver, wanted person) was mentioned in the traffic, append a MyCase link using the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both the link text and query params.
 
 Incident numbers are persistent identifiers. Use only integers, never letters. \
@@ -1486,7 +1488,7 @@ Rules:
   the log shows ongoing activity.
 - Location must be a pure mappable address/place only, or Unknown. Put uncertainty and context in details.
 - Keep each incident concise: at most two details.
-- priority is 1-5 urgency: 1=critical/life-threatening, 2=serious/major, 3=moderate (default), 4=non-urgent, 5=routine/minor. Use the existing board value (shown as P# in the board context) if unchanged. Update it if new traffic changes severity.
+- priority is 1-5 urgency: 1=critical/life-threatening, 2=serious/major, 3=moderate (default), 4=non-urgent, 5=routine/minor. Use the existing board value (shown as P# in the board context) if unchanged. Update it if new traffic changes severity. When marking CLEAR, set priority to 4 or 5.
 - IMPORTANT: When a person's name appears in the transmissions, you MUST include a MyCase link in the action field. Use the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) with the real name in both the label and the query params.
 - If there are no incident updates, return {{"incidents":[]}}.
 """
@@ -1587,7 +1589,7 @@ def _validate_incident_updates(payload: dict) -> list[dict]:
             "number": number,
             "title": title,
             "agency": str(inc.get("agency") or "Unknown").strip(),
-            "status": str(inc.get("status") or "WATCH").strip(),
+            "status": str(inc.get("status") or "ACTIVE").strip(),
             "location": str(inc.get("location") or "Unknown").strip(),
             "details": [str(d).strip() for d in details if str(d).strip()][:2],
             "action": str(inc.get("action") or "").strip(),

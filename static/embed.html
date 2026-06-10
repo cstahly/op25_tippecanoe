@@ -69,6 +69,9 @@ a:hover { text-decoration: underline; }
 .prio-badge { font-size: 10px; font-weight: 800; border-radius: 3px; padding: 1px 5px; }
 .prio-badge.p1 { background: rgba(168,85,247,.2); color: #c084fc; }
 .prio-badge.p2 { background: rgba(239,68,68,.2);  color: #f87171; }
+.prio-badge.p3 { background: rgba(234,179,8,.15);  color: #ca8a04; }
+.prio-badge.p4 { background: rgba(14,165,233,.15); color: #0ea5e9; }
+.prio-badge.p5 { background: rgba(71,85,105,.2);   color: #94a3b8; }
 .incident { transition: outline-color .3s; }
 .inc-header { display: flex; align-items: flex-start; gap: 8px; }
 .inc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; }
@@ -194,7 +197,7 @@ function initMap() {
 
 function pinColor(kind) {
   if (kind === 'active') return '#f85149';
-  if (kind === 'watch')  return '#d29922';
+  if (kind === 'routine') return '#d29922';
   return '#484f58';
 }
 
@@ -343,9 +346,10 @@ document.querySelectorAll('.fpill[data-tf]').forEach(btn => {
 
 // ── Renderers ─────────────────────────────────────────────────────────────────
 function renderIncidents(incidents) {
-  const open   = incidents.filter(i => i.status_kind !== 'clear' && !i.is_stale);
-  const stale  = incidents.filter(i => i.status_kind !== 'clear' && i.is_stale);
-  const closed = incidents.filter(i => i.status_kind === 'clear');
+  const byPrio = (a, b) => (a.priority || 3) - (b.priority || 3);
+  const open   = incidents.filter(i => i.status_kind !== 'clear' && !i.is_stale).sort(byPrio);
+  const stale  = incidents.filter(i => i.status_kind !== 'clear' && i.is_stale).sort(byPrio);
+  const closed = incidents.filter(i => i.status_kind === 'clear').sort(byPrio);
   const list   = [...open, ...stale, ...closed];
 
   document.getElementById('incidents-title').textContent =
@@ -355,8 +359,7 @@ function renderIncidents(incidents) {
 
   return list.map(inc => {
     const prio    = inc.priority || 3;
-    const prioBadge = prio <= 1 ? `<span class="prio-badge p1">P1</span>` :
-                      prio <= 2 ? `<span class="prio-badge p2">P2</span>` : '';
+    const prioBadge = `<span class="prio-badge p${prio}">P${prio}</span>`;
     const details = (inc.details || []).map(d => `<div class="inc-detail">${esc(d)}</div>`).join('');
     const action  = inc.action ? `<div class="inc-action">${renderLinks(inc.action)}</div>` : '';
     const hasExtra = details || action;
