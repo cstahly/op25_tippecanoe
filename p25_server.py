@@ -557,7 +557,7 @@ def _extract_incidents_from_summary(entry: dict) -> list[dict]:
                 key = _clean_md(m.group(1)).lower()
                 value = _clean_md(m.group(2))
                 fields[key] = value
-                if key not in ("agency", "status", "location", "time"):
+                if key not in ("agency", "status", "location", "time", "priority"):
                     details.append(value)
             elif not line.upper().startswith(("AGENCY:", "STATUS:", "LOCATION:")):
                 details.append(line)
@@ -576,6 +576,7 @@ def _extract_incidents_from_summary(entry: dict) -> list[dict]:
             "status_kind": _status_kind(status, blob),
             "location": fields.get("location", ""),
             "details": details[:8],
+            "priority": max(1, min(5, int(fields.get("priority", 3) or 3))),
             "source_summary_id": entry.get("id", ""),
         })
     return incidents
@@ -703,7 +704,8 @@ def incident_board_context_from_incidents(incidents: list[dict]) -> str:
         status = inc.get("status") or "WATCH"
         title = inc.get("title") or "Incident"
         stale = " | STALE" if inc.get("is_stale") else ""
-        lines.append(f"{inc['number']}. {status}{stale} | {title} | {location}")
+        priority = inc.get("priority") or 3
+        lines.append(f"{inc['number']}. {status}{stale} | P{priority} | {title} | {location}")
     return "\n".join(lines)
 
 def _is_summary_marker(l: str) -> bool:
@@ -769,7 +771,8 @@ def init_state_db() -> None:
             action TEXT NOT NULL,
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 3
         );
         CREATE TABLE IF NOT EXISTS app_state (
             key TEXT PRIMARY KEY,
@@ -805,6 +808,10 @@ def init_state_db() -> None:
             pass  # column already exists
         try:
             conn.execute("ALTER TABLE incident_state ADD COLUMN last_tx_id INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE incident_state ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
         except Exception:
             pass  # column already exists
         # Backfill first_tx_id for incidents created before this column existed.
@@ -893,6 +900,7 @@ def incident_rows_from_db(conn: sqlite3.Connection) -> list[dict]:
         "LEFT JOIN geocode_cache g ON i.location = g.address "
         "ORDER BY "
         "CASE i.status_kind WHEN 'active' THEN 0 WHEN 'watch' THEN 1 WHEN 'routine' THEN 2 WHEN 'clear' THEN 3 ELSE 1 END, "
+        "i.priority DESC, "
         "i.last_seen DESC"
     ).fetchall()
     return [_incident_row_to_api(row) for row in rows]
@@ -969,6 +977,7 @@ def _incident_row_to_api(row: sqlite3.Row) -> dict:
         "is_stale": is_stale,
         "lat": lat,
         "lng": lng,
+        "priority": int(row["priority"]) if row["priority"] is not None else 3,
     }
 
 def _incident_by_number(conn: sqlite3.Connection, number: int) -> dict | None:
@@ -987,6 +996,7 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     title = str(inc.get("title") or "Incident").strip()
     status = str(inc.get("status") or "WATCH").strip()
     blob = "\n".join([title, status, *(str(d) for d in details)])
+    priority = max(1, min(5, int(inc.get("priority") or 3)))
     row = conn.execute("SELECT first_seen, first_tx_id, last_tx_id FROM incident_state WHERE number = ?", (number,)).fetchone()
     first_seen = row["first_seen"] if row else now
     stored_first_tx_id = int(row["first_tx_id"]) if row and row["first_tx_id"] else 0
@@ -996,8 +1006,8 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     conn.execute(
         """
         INSERT INTO incident_state
-            (number, title, agency, status, status_kind, location, details_json, action, first_seen, last_seen, updated_at, first_tx_id, last_tx_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (number, title, agency, status, status_kind, location, details_json, action, first_seen, last_seen, updated_at, first_tx_id, last_tx_id, priority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(number) DO UPDATE SET
             title = excluded.title,
             agency = excluded.agency,
@@ -1008,7 +1018,8 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
             action = excluded.action,
             last_seen = excluded.last_seen,
             updated_at = excluded.updated_at,
-            last_tx_id = excluded.last_tx_id
+            last_tx_id = excluded.last_tx_id,
+            priority = excluded.priority
         """,
         (
             number,
@@ -1024,6 +1035,7 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
             now,
             effective_first_tx_id,
             effective_last_tx_id,
+            priority,
         ),
     )
 
@@ -1357,6 +1369,7 @@ Use one markdown section per incident with this shape:
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
 - Location: pure mappable address/place only, or Unknown. Do not add context, explanations, parentheticals, routes, or "near..." guesses here.
 - Details: concise update
+- Priority: 1-5 urgency (1=routine traffic stop/minor call, 2=non-urgent response, 3=moderate/standard, 4=serious/major incident, 5=critical/life-threatening/mass casualty). Update if new traffic changes severity. Use the existing board value if no change.
 - Action: what remains unresolved or what to watch for. REQUIRED: if a person's name (suspect, subject, driver, wanted person) was mentioned in the traffic, append a MyCase link using the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both the link text and query params.
 
 Incident numbers are persistent identifiers. Use only integers, never letters. \
@@ -1397,6 +1410,7 @@ Return concise markdown sections:
 - Status:
 - Location: pure mappable address/place only, or Unknown
 - Details:
+- Priority: 1-5 urgency (1=routine, 5=critical/life-threatening)
 - Action:
 """
 
@@ -1427,6 +1441,7 @@ Use one markdown section per incident:
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
 - Location: pure mappable address/place only, or Unknown
 - Details: concise full-arc update
+- Priority: 1-5 urgency (1=routine, 2=non-urgent, 3=moderate, 4=serious, 5=critical/life-threatening)
 - Action: what remains unresolved or what to watch for. REQUIRED: if a person's name (suspect, subject, driver, wanted person) was mentioned, append a MyCase link using the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both the link text and query params.
 
 Chunk summaries:
@@ -1453,6 +1468,7 @@ Return JSON only, with no markdown and no preamble. The JSON shape is:
       "status": "ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING",
       "location": "pure mappable address/place only, or Unknown",
       "details": ["one short fact from the new transmissions", "optional second short fact"],
+      "priority": 3,
       "action": "what remains unresolved or what to watch for. If a person's name (suspect, subject, driver, wanted person) was mentioned, append a MyCase link: [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both label and query params."
     }}
   ]
@@ -1470,6 +1486,7 @@ Rules:
   the log shows ongoing activity.
 - Location must be a pure mappable address/place only, or Unknown. Put uncertainty and context in details.
 - Keep each incident concise: at most two details.
+- priority is 1-5 urgency: 1=routine/minor, 2=non-urgent, 3=moderate (default), 4=serious/major, 5=critical/life-threatening. Use the existing board value (shown as P# in the board context) if unchanged. Update it if new traffic changes severity.
 - IMPORTANT: When a person's name appears in the transmissions, you MUST include a MyCase link in the action field. Use the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) with the real name in both the label and the query params.
 - If there are no incident updates, return {{"incidents":[]}}.
 """
@@ -1574,6 +1591,7 @@ def _validate_incident_updates(payload: dict) -> list[dict]:
             "location": str(inc.get("location") or "Unknown").strip(),
             "details": [str(d).strip() for d in details if str(d).strip()][:2],
             "action": str(inc.get("action") or "").strip(),
+            "priority": max(1, min(5, int(inc.get("priority") or 3))),
         })
     return valid
 
@@ -1589,6 +1607,7 @@ def _incident_updates_markdown(updates: list[dict]) -> str:
             f"- Status: {inc.get('status') or 'WATCH'}\n"
             f"- Location: {inc.get('location') or 'Unknown'}\n"
             f"- Details: {details}\n"
+            f"- Priority: {inc.get('priority') or 3}\n"
             f"- Action: {inc.get('action') or 'None'}"
         )
     return "\n\n---\n\n".join(blocks)
