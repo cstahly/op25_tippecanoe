@@ -709,6 +709,31 @@ def incident_board_context_from_incidents(incidents: list[dict]) -> str:
         lines.append(f"{inc['number']}. {status}{stale} | P{priority} | {title} | {location}")
     return "\n".join(lines)
 
+def incident_history_context(hours: int = 48, limit: int = 400) -> str:
+    """Compact digest of all incidents (including cleared) with activity in the last
+    `hours`, used by the full summary for cross-incident correlation."""
+    cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT number, title, agency, status, location, first_seen "
+                "FROM incident_state WHERE last_seen >= ? ORDER BY number DESC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = [
+        f"Prior-incident history (last {hours}h, including cleared incidents). "
+        "These lines are condensed from partial radio transcripts; treat details as approximate:"
+    ]
+    for r in reversed(rows):  # oldest first
+        lines.append(
+            f"#{r['number']} | {r['first_seen']} | {r['status']} | {r['title']} | {r['agency']} | {r['location']}"
+        )
+    return "\n".join(lines)
+
 def _is_summary_marker(l: str) -> bool:
     return SUMMARY_MARKER in l or FULL_SUMMARY_MARKER in l
 
@@ -1492,6 +1517,15 @@ medical assists, welfare checks) resolve in minutes unless the log shows otherwi
 
 Location must be a pure mappable address/place only, or Unknown. Put context, uncertainty, and secondary \
 locations in Details, not Location.
+
+{history_context}
+
+Cross-reference each incident against the prior-incident history above. When a current incident \
+plausibly continues or results from an earlier one — same person, vehicle, or location, or a causal \
+chain (arrest -> jail medical, crash -> traffic control/cleanup, pursuit -> custody, fight -> ER) — \
+append a final sentence to that incident's Details in the form "Related: #672 — one-line reason." \
+Use "possibly related" when the link is an inference rather than explicit. Do not force links; \
+most incidents have none. At most two Related references per incident.
 Output only the final incident sections. Do not include preamble, analysis narration, search narration, \
 or phrases like "I'll analyze", "I'll work through", "let me", or "now I have enough".
 
@@ -1897,7 +1931,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         incident_context=incident_context,
         block="\n".join(lines),
     )
-    max_tokens   = 16000 if req.full else 8192
+    max_tokens   = 32000 if req.full else 8192  # full runs opus + adaptive thinking, which shares this budget; streamed, so large is safe
 
     async def stream_summary() -> AsyncGenerator[str, None]:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -1942,15 +1976,19 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                         yield ": keepalive\n\n"
                 request_prompt = FULL_CONSOLIDATE_TEMPLATE.format(
                     incident_context=incident_context,
+                    history_context=incident_history_context(),
                     block="\n\n".join(partials),
                 )
 
-            async with client.messages.stream(
-                model="claude-sonnet-4-6",
-                max_tokens=max_tokens,
-                tools=[{"type": "web_search_20260209", "name": "web_search"}],
-                messages=[{"role":"user","content":request_prompt}],
-            ) as s:
+            consolidate_kwargs: dict = {
+                "model": "claude-opus-4-8" if req.full else "claude-sonnet-4-6",
+                "max_tokens": max_tokens,
+                "tools": [{"type": "web_search_20260209", "name": "web_search"}],
+                "messages": [{"role": "user", "content": request_prompt}],
+            }
+            if req.full:
+                consolidate_kwargs["thinking"] = {"type": "adaptive"}
+            async with client.messages.stream(**consolidate_kwargs) as s:
                 display_started = False
                 display_buffer = ""
                 async for chunk in s.text_stream:

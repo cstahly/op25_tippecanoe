@@ -1,6 +1,6 @@
 # P25 / SDR System — Agent Handoff
 
-Last updated: 2026-06-10 (overnight session — conversational slicing). Read before changing anything.
+Last updated: 2026-06-10 (morning session). Read before changing anything.
 
 Hardware is a Kali bare-metal box. Full sudo is available. OP25 runs as a user terminal
 process; the web app runs under systemd.
@@ -128,9 +128,9 @@ sudo systemctl status sdr-scheduler
 
 - RTL-SDR v3 (USB, SN 00000001) for satellite work
 - SAWbird+ NOAA 137 LNA in chain — powered via bias-tee (`rtl_biast -d 0 -b 1` before capture, `-b 0` after)
-- Antenna: outdoor V-dipole on 12' painter's pole, cut for 145 MHz
+- Antenna: horizontal V-dipole (53.4cm arms, 137 MHz) on outdoor 12' painter's pole, ~3 ft below ADS-B. Primary sat antenna — has been in place for a while; previously misdocumented as "145 MHz." Currently via SAWbird+ NOAA 137 → RTL-SDR #1. Plan: swap SAWbird+ for Nooelec LaNA (wideband) to also cover 145/435 MHz birds on same antenna.
 
-### Active rules (as of 2026-06-09)
+### Active rules (as of 2026-06-10)
 
 Only 137 MHz rules are enabled. All 145/435 MHz rules disabled pending Nooelec LaNA arrival.
 
@@ -141,7 +141,10 @@ Only 137 MHz rules are enabled. All 145/435 MHz rules disabled pending Nooelec L
 
 All other rules (`enabled: false`): AO-73, AO-7, AO-91, PO-101, JO-97, CAS-6, SO-50, FO-29, RS-44, ISS.
 
-Re-enable non-137 MHz rules after Nooelec LaNA arrives and is in chain. LaNA does NOT need bias-tee (it has its own power). SAWbird+ NOAA does need bias-tee. Decide chain config before re-enabling.
+Re-enable rules when hardware is ready:
+- **435 MHz rules** (SO-50, FO-29, RS-44): re-enable after Arrow 440-3 Yagi arrives (2026-06-13) and LaNA is in chain.
+- **145 MHz rules** (AO-7, AO-73, AO-91, CAS-6, JO-97, etc.): no 145 MHz antenna exists — user would need to build a ~49cm arm V-dipole and mount it. Do NOT re-enable these rules until that's done.
+- LaNA does NOT need bias-tee. SAWbird+ does. Decide chain config before re-enabling.
 
 ### Bias-tee operation
 
@@ -154,7 +157,13 @@ rtl_biast -d 0 -b 0   # after capture
 
 The scheduler's `rtl_sdr_capture()` handles this automatically when `bias_tee=True` in the rule. The SAWbird+ LED should be lit during every M2-3 and M2-4 capture.
 
-### Bugs fixed in this session (2026-06-09)
+### Bugs fixed in session 2026-06-10
+
+1. **Claude PATH in systemd** — scheduler was logging `PASS MANAGER Claude invoke FAIL — [Errno 2] No such file or directory: 'claude'` on every pass. Fixed by adding `Environment=PATH=/home/cstahly/.local/bin:/usr/local/bin:/usr/bin:/bin` to `/etc/systemd/system/sdr-scheduler.service`. Service restarted.
+
+2. **Backfill elevation = 0 bug** — `backfill_meteor_images()` was looking up history by the `_decode` capdir (e.g. `meteor_m2_3_1113_decode`) which never matched history keys (keyed by `meteor_m2_3_1113`). Fixed in `sdr_scheduler.py`: `_lookup = capdir.removesuffix("_decode")` fallback. Manifest also corrected: `meteor_m2_3_2234_decode` 0→69.0°, `meteor_m2_3_1113_decode` 0→79.9°. Index re-pushed to server.
+
+### Bugs fixed in session 2026-06-09
 
 1. **Blocking satdump decode**: `rtlsdr_satdump_decode()` was calling `proc.wait()` on the satdump process, blocking the scheduler's main loop and causing it to miss subsequent passes. **Fixed**: satdump now runs in a background thread (`threading.Thread(target=_run_decode, daemon=False).start()`). The function returns 0 immediately after launching the thread; DECODE DONE is logged asynchronously.
 
@@ -180,13 +189,15 @@ f.seek(0); json.dump(c, f, indent=4); f.truncate()
 "
 ```
 
-### M2-3 decode status (as of 2026-06-09)
+### M2-3 decode status (as of 2026-06-10)
 
-No successful decodes with SAWbird+ yet. All captures tonight:
-- 28.8° automated pass: 0 CADU, no lock — low elevation may be insufficient with current antenna
-- 45.4° manual pass: 0 CADU, no lock — capture started after LOS (missed due to scheduler blocking bug, now fixed)
+**SAWbird+ first success: 74.0° pass (2026-06-08 22:10 local) — 3.3MB CADU, full imagery.** Best images at `~/noaa_captures/meteor_m2_3_2210/MSU-MR/`. A diagonal-fade splice of MSA_corrected_map (top-left) + AVHRR_3a21_false_color_corrected (bottom-right) was uploaded to sadbabyrabbit.com/meteor/ as `20260609T0251.png` and saved locally as `meteor_splice.png` in that same dir.
 
-Previously confirmed working (before SAWbird+, 2026-06-07): successful decodes at 41.7° and 79.9° passes. Best images at `~/noaa_captures/meteor_m2_3_1113_decode/MSU-MR/`.
+Failed passes with SAWbird+: 28.8°, 22.1°, 22.1° — all 0 CADU. Elevation threshold appears to be ~40°+ for reliable lock with V-dipole + SAWbird+. Gain=40 is correct at 74° — do not adjust without a reason.
+
+Previously confirmed working (before SAWbird+, 2026-06-07): successful decodes at 41.7° and 79.9° passes.
+
+Pending cleanup: `~/noaa_captures/meteor_m2_3_2328.iq` (3.7GB, 22.1° pass, 0 CADU confirmed) — safe to delete.
 
 ### Critical fixed bugs from earlier sessions (do not reintroduce)
 
@@ -202,7 +213,7 @@ Previously confirmed working (before SAWbird+, 2026-06-07): successful decodes a
 
 | Item | ETA | Notes |
 |------|-----|-------|
-| Nooelec LaNA (standard, NOT WB) | 2026-06-10 | Wideband LNA 20MHz-4GHz. Does NOT need bias-tee. Re-enable all disabled sat rules after chain is configured. |
+| Nooelec LaNA (standard, NOT WB) | 2026-06-11 (tomorrow) | Wideband LNA 20MHz-4GHz. Does NOT need bias-tee. Re-enable all disabled sat rules after chain is configured. |
 | Arrow Antenna II 440-3 Yagi | 2026-06-13 (Fri) | 3-el 70cm Yagi. Fixed mount facing ENE (35.5% of elevation-weighted passes) based on 97-pass analysis. |
 | LiteVNA | 2026-06-13 (Fri) | For antenna sweep/characterization |
 
@@ -212,14 +223,21 @@ Previously confirmed working (before SAWbird+, 2026-06-07): successful decodes a
 
 - **HackRF One** (serial `14d463dc2f209de1`) — P25 only, do not use for satellite
 - **RTL-SDR v3 #1** (SN 00000001) — satellite scheduler
-- **RTL-SDR v3 #2** — ADS-B / piaware at 1090 MHz (second dongle, FA ADS-B antenna)
+- **RTL-SDR v3 #2** (arrived 2026-06-10) — ADS-B / piaware at 1090 MHz
 - **SAWbird+ NOAA 137** — inline on V-dipole → RTL-SDR #1, bias-tee powered
-- **Nooelec LaNA** — arriving tomorrow; wideband, no bias-tee needed
-- **Kenwood TR-7400A** — 2m FM rig, working. Speaker connected. No tone pad yet.
+- **Nooelec LaNA** — arriving 2026-06-11; wideband, no bias-tee needed
+- **Kenwood TR-7400A** — 2m FM rig, working. Speaker connected. No tone pad yet. PTT confirmed by shorting mic pins to ground (TX indicator lights up). DUP -600 kHz tested on 146.730 W9ARP (no tone).
 - **Heltec LoRa32 V4** — purchased, not set up. Meshtastic target, 915 MHz ISM.
-- **V-dipole 145 MHz** — outdoor on 12' painter's pole, active for satellite work
-- **V-dipole 8.8cm telescoping arms** — currently on P25 monitor. Arms extend — usable for 462 MHz if extended to ~16cm.
-- **FA ADS-B antenna** — on RTL-SDR #2 / piaware
+- **FA ADS-B antenna** — top of outdoor mast (~12-13 ft), on RTL-SDR #2 / piaware
+- **Horizontal V-dipole, 53.4cm arms** — ~3 ft below ADS-B on painter's pole. Primary sat antenna, long-established. SAWbird+ NOAA 137 → RTL-SDR #1 / satellite scheduler (137.9 MHz).
+- **V-dipole 8.8cm telescoping arms** — ~2 ft below horizontal V-dipole on mast, vertical orientation. For P25 / HackRF (8.8cm = λ/4 at 852 MHz, matches Tippecanoe control channels). User considering moving inside; considering a 60cm V-dipole for 2m repeater RX instead.
+
+### Outdoor Mast Layout (as of 2026-06-10)
+
+12' painter's pole. Top to bottom:
+1. **FA ADS-B antenna** — ~12-13 ft AGL → ~25 ft coax → RTL-SDR #2 / piaware (1090 MHz)
+2. **Horizontal V-dipole (53.4cm arms)** — ~3 ft below ADS-B → SAWbird+ NOAA 137 (for now) → RTL-SDR #1 / satellite scheduler (137.9 MHz). Swap to Nooelec LaNA when it arrives (2026-06-11) to enable 145/435 MHz coverage on same antenna.
+3. **8.8cm V-dipole (vertical)** — ~3 ft below horizontal V-dipole → HackRF (P25, ~852 MHz). User moving this inside.
 
 ---
 
