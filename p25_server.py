@@ -199,14 +199,16 @@ async def _geocode_worker():
         await asyncio.sleep(next_sleep)
 
 async def _auto_summary_worker():
-    """Run an incremental Haiku summary every AUTO_SUMMARY_INTERVAL seconds."""
+    """Run an incremental summary (claude CLI, haiku) every AUTO_SUMMARY_INTERVAL seconds."""
     await asyncio.sleep(120)  # let the server settle, then summarize immediately
     while True:
-        if os.environ.get("ANTHROPIC_API_KEY"):
+        if os.path.exists(CLAUDE_CLI):
             try:
                 await _run_auto_summary_once()
             except Exception as exc:
                 sys.stderr.write(f"[auto-summary] error: {exc}\n")
+        else:
+            sys.stderr.write(f"[auto-summary] claude CLI not found at {CLAUDE_CLI}\n")
         await asyncio.sleep(AUTO_SUMMARY_INTERVAL)
 
 async def _run_auto_summary_once():
@@ -228,16 +230,7 @@ async def _run_auto_summary_once():
         incident_context=incident_context,
         block="\n".join(lines),
     )
-    client = anthropic.AsyncAnthropic()
-    message = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    if message.stop_reason == "max_tokens":
-        sys.stderr.write("[auto-summary] hit max_tokens — skipping write\n")
-        return
-    raw = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
+    raw = await _claude_cli_text(prompt, model="haiku")
     updates = _validate_incident_updates(_parse_json_object(raw))
     markdown = _incident_updates_markdown(updates)
     completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1542,6 +1535,55 @@ Chunk summaries:
 {block}
 """
 
+FULL_CLI_TEMPLATE = """\
+You are creating the final full-session incident summary for Tippecanoe County public safety radio traffic.
+
+{incident_context}
+
+{history_context}
+
+The full session transcript is below (format [HH:MM:SS] [TALKGROUP] [trunk:tippecanoe|safet] transcript).
+Trunk "tippecanoe" = Tippecanoe County P25. Trunk "safet" = Indiana SAFE-T (ISP/INDOT).
+Transcripts are imperfect speech-to-text of radio audio: expect garbled words, misheard names, and \
+partial sentences. Reconcile the transcript against the existing numbered incident board above.
+
+Incident numbers are persistent identifiers. Use only integers, never letters. Reuse existing incident \
+numbers for the same real-world incident. Do not renumber incidents. Assign new incidents the next \
+unused integer after the highest existing incident number.
+
+CRITICAL — incident clearance: Actively review every incident in the existing board. \
+Mark incidents CLEAR when: units return to service (10-8, available), dispatch says disregard (10-22), \
+scene cleared, transport completed, or log shows no follow-up activity. \
+A brief mention with no callback or follow-up = CLEAR. Short-duration calls (stops, minor accidents, \
+medical assists, welfare checks) resolve in minutes unless the log shows otherwise.
+
+Location must be a pure mappable address/place only, or Unknown. Put context, uncertainty, and secondary \
+locations in Details, not Location.
+
+Cross-reference each incident against the prior-incident history above. When a current incident \
+plausibly continues or results from an earlier one — same person, vehicle, or location, or a causal \
+chain (arrest -> jail medical, crash -> traffic control/cleanup, pursuit -> custody, fight -> ER) — \
+append a final sentence to that incident's Details in the form "Related: #672 — one-line reason." \
+Use "possibly related" when the link is an inference rather than explicit. Do not force links; \
+most incidents have none. At most two Related references per incident.
+
+Do not use any tools; answer directly from the transcript provided here.
+Output only the final incident sections. Do not include preamble, analysis narration, \
+or phrases like "I'll analyze", "I'll work through", "let me", or "now I have enough".
+
+Use one markdown section per incident:
+### INCIDENT 12: Short incident title
+- Agency: agency or agencies
+- Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
+- Location: pure mappable address/place only, or Unknown
+- Details: concise full-arc update
+- Priority: 1-5 urgency (1=critical/life-threatening, 2=serious, 3=moderate, 4=non-urgent, 5=routine)
+- Action: what remains unresolved or what to watch for. REQUIRED: if a person's name (suspect, subject, driver, wanted person) was mentioned, append a MyCase link using the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both the link text and query params.
+
+Transcript:
+{block}
+"""
+
 INCREMENTAL_JSON_TEMPLATE = """\
 You update a live incident board for Tippecanoe County public safety radio traffic.
 
@@ -1624,6 +1666,34 @@ def _chunk_lines(lines: list[str], max_chars: int = 80000) -> list[list[str]]:
     if current:
         chunks.append(current)
     return chunks
+
+CLAUDE_CLI = os.path.expanduser("~/.local/bin/claude")
+FULL_CLI_MAX_CHARS = 3_400_000   # ~850K tokens; keep the most recent transcript if over
+FULL_CLI_TIMEOUT_S = 1800
+
+async def _claude_cli_text(prompt: str, model: str = "opus") -> str:
+    """Run the Claude Code CLI in print mode. Strips ANTHROPIC_API_KEY so the CLI
+    uses the logged-in subscription rather than API billing."""
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    proc = await asyncio.create_subprocess_exec(
+        CLAUDE_CLI, "-p", "--model", model,
+        "--disallowedTools", "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    try:
+        out_b, err_b = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=FULL_CLI_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"claude CLI timed out after {FULL_CLI_TIMEOUT_S}s")
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude CLI exited {proc.returncode}: {err_b.decode(errors='replace')[:400]}")
+    out = out_b.decode(errors="replace").strip()
+    if not out:
+        raise RuntimeError("claude CLI returned no output")
+    return out
 
 async def _anthropic_text(
     client: anthropic.AsyncAnthropic,
@@ -1931,7 +2001,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         incident_context=incident_context,
         block="\n".join(lines),
     )
-    max_tokens   = 32000 if req.full else 8192  # full runs opus + adaptive thinking, which shares this budget; streamed, so large is safe
+    max_tokens   = 8192  # non-full path only; full summaries run via the claude CLI
 
     async def stream_summary() -> AsyncGenerator[str, None]:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -1944,68 +2014,51 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         try:
             request_prompt = prompt
             if req.full:
-                chunks = _chunk_lines(lines)
-                partials = []
-                for idx, chunk_lines in enumerate(chunks, start=1):
-                    notice = f"\n\n[processing full-summary chunk {idx}/{len(chunks)}]\n"
-                    yield f"data: {json.dumps({'text':notice})}\n\n"
-                    chunk_prompt = FULL_CHUNK_TEMPLATE.format(
-                        incident_context=incident_context,
-                        chunk_num=idx,
-                        chunk_count=len(chunks),
-                        block="\n".join(chunk_lines),
-                    )
-                    chunk_task = asyncio.create_task(
-                        _anthropic_text(client, chunk_prompt, max_tokens=3000, use_search=False)
-                    )
-                    while not chunk_task.done():
-                        await asyncio.sleep(15)
-                        yield ": keepalive\n\n"
-                    partial = chunk_task.result()
-                    partials.append(f"## Chunk {idx}/{len(chunks)}\n{partial.strip()}")
-                    if idx < len(chunks):
-                        yield f"data: {json.dumps({'text':'[waiting for rate-limit window]\\n'})}\n\n"
-                        for _ in range(5):
-                            await asyncio.sleep(13)
-                            yield ": keepalive\n\n"
-
-                yield f"data: {json.dumps({'text':'\\n[consolidating full summary]\\n'})}\n\n"
-                if len(chunks) > 1:
-                    for _ in range(5):
-                        await asyncio.sleep(13)
-                        yield ": keepalive\n\n"
-                request_prompt = FULL_CONSOLIDATE_TEMPLATE.format(
+                # Single-shot full summary via the claude CLI: whole transcript in one
+                # prompt (no chunking, no max_tokens plumbing), subscription auth.
+                transcript = "\n".join(lines)
+                if len(transcript) > FULL_CLI_MAX_CHARS:
+                    transcript = transcript[-FULL_CLI_MAX_CHARS:]
+                    transcript = transcript[transcript.find("\n") + 1:]
+                    yield f"data: {json.dumps({'text':'[transcript truncated to the most recent portion]\\n'})}\n\n"
+                request_prompt = FULL_CLI_TEMPLATE.format(
                     incident_context=incident_context,
                     history_context=incident_history_context(),
-                    block="\n\n".join(partials),
+                    block=transcript,
                 )
+                yield f"data: {json.dumps({'text':'[running full summary via claude CLI (opus); this takes a few minutes]\\n'})}\n\n"
+                cli_task = asyncio.create_task(_claude_cli_text(request_prompt, model="opus"))
+                while not cli_task.done():
+                    await asyncio.sleep(15)
+                    yield ": keepalive\n\n"
+                full = cli_task.result()
+                match = SUMMARY_HAS_INCIDENT_RE.search(full)
+                yield f"data: {json.dumps({'text': full[match.start():] if match else full})}\n\n"
 
-            consolidate_kwargs: dict = {
-                "model": "claude-opus-4-8" if req.full else "claude-sonnet-4-6",
-                "max_tokens": max_tokens,
-                "tools": [{"type": "web_search_20260209", "name": "web_search"}],
-                "messages": [{"role": "user", "content": request_prompt}],
-            }
-            if req.full:
-                consolidate_kwargs["thinking"] = {"type": "adaptive"}
-            async with client.messages.stream(**consolidate_kwargs) as s:
-                display_started = False
-                display_buffer = ""
-                async for chunk in s.text_stream:
-                    full += chunk
-                    if display_started:
-                        yield f"data: {json.dumps({'text':chunk})}\n\n"
-                    else:
-                        display_buffer += chunk
-                        match = SUMMARY_HAS_INCIDENT_RE.search(display_buffer)
-                        if match:
-                            display_started = True
-                            yield f"data: {json.dumps({'text':display_buffer[match.start():]})}\n\n"
-                message = await s.get_final_message()
-                if message.stop_reason == "max_tokens":
-                    msg = "Summary failed: Claude hit max_tokens before finishing, so nothing was written to the log. Try again."
-                    yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
-                    return
+            if not req.full:
+                async with client.messages.stream(
+                    model="claude-sonnet-4-6",
+                    max_tokens=max_tokens,
+                    tools=[{"type": "web_search_20260209", "name": "web_search"}],
+                    messages=[{"role": "user", "content": request_prompt}],
+                ) as s:
+                    display_started = False
+                    display_buffer = ""
+                    async for chunk in s.text_stream:
+                        full += chunk
+                        if display_started:
+                            yield f"data: {json.dumps({'text':chunk})}\n\n"
+                        else:
+                            display_buffer += chunk
+                            match = SUMMARY_HAS_INCIDENT_RE.search(display_buffer)
+                            if match:
+                                display_started = True
+                                yield f"data: {json.dumps({'text':display_buffer[match.start():]})}\n\n"
+                    message = await s.get_final_message()
+                    if message.stop_reason == "max_tokens":
+                        msg = "Summary failed: Claude hit max_tokens before finishing, so nothing was written to the log. Try again."
+                        yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
+                        return
         except Exception as exc:
             msg = f"Summary failed: {exc}"
             yield f"data: {json.dumps({'error':msg,'done':True})}\n\n"
