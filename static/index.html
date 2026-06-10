@@ -595,7 +595,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v42';
+const APP_VERSION = 'v43';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -1806,10 +1806,12 @@ const MAP_STATUS_COLORS = {
 };
 
 function _markerStyle(incident) {
-  if (incident.is_stale) {
-    return { radius: 8, fillColor: '#6b7280', color: '#4b5563', weight: 1, opacity: 0.5, fillOpacity: 0.22 };
-  }
   const color = MAP_STATUS_COLORS[incident.status_kind || 'active'] || '#3b82f6';
+  if (incident.is_stale) {
+    // Faded version of the live pin with a dashed ring — visible but clearly "gone quiet"
+    return { radius: 9, fillColor: color, color: color, weight: 1.5,
+             opacity: 0.75, fillOpacity: 0.4, dashArray: '3,4' };
+  }
   return { radius: 10, fillColor: color, color: '#fff', weight: 2, opacity: 1, fillOpacity: 0.9 };
 }
 
