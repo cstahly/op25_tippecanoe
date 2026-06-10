@@ -1670,7 +1670,7 @@ def _chunk_lines(lines: list[str], max_chars: int = 80000) -> list[list[str]]:
 CLAUDE_CLI = os.path.expanduser("~/.local/bin/claude")
 # claude -p double-counts piped stdin (conversation + attachment content) against its
 # 1M-token request limit, so the usable prompt budget is just under 500K tokens.
-FULL_CLI_MAX_CHARS = 1_800_000   # ~450K tokens -> ~900K after doubling; keep most recent
+FULL_CLI_MAX_CHARS = 1_650_000   # measured: 3.66 chars/token, doubled + ~27K CLI overhead -> ~930K of the 1M limit
 FULL_CLI_TIMEOUT_S = 1800
 
 async def _claude_cli_text(prompt: str, model: str = "opus") -> str:
