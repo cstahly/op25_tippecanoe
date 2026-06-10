@@ -5,7 +5,7 @@ P25 web app backend.
 Auth: P25_USER / P25_PASSWORD env vars (defaults: p25 / scanner)
 """
 import base64, hashlib, hmac, html as _html, math, os, re, sys, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import AsyncGenerator, Set
@@ -32,7 +32,7 @@ RATE_LIMITS: dict[str, float] = {}
 TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
 STALE_DISPLAY_SECONDS  = int(os.environ.get("P25_STALE_DISPLAY_SECONDS",  str(1 * 60 * 60)))
 STALE_INCIDENT_SECONDS = int(os.environ.get("P25_STALE_INCIDENT_SECONDS", str(4 * 60 * 60)))
-AUTO_SUMMARY_INTERVAL  = int(os.environ.get("P25_AUTO_SUMMARY_INTERVAL", str(2 * 60 * 60)))  # seconds
+AUTO_SUMMARY_INTERVAL  = int(os.environ.get("P25_AUTO_SUMMARY_INTERVAL", str(15 * 60)))  # seconds
 
 app = FastAPI()
 
@@ -200,57 +200,59 @@ async def _geocode_worker():
 
 async def _auto_summary_worker():
     """Run an incremental Haiku summary every AUTO_SUMMARY_INTERVAL seconds."""
-    await asyncio.sleep(60)  # let the server settle before first run
+    await asyncio.sleep(120)  # let the server settle, then summarize immediately
     while True:
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            try:
+                await _run_auto_summary_once()
+            except Exception as exc:
+                sys.stderr.write(f"[auto-summary] error: {exc}\n")
         await asyncio.sleep(AUTO_SUMMARY_INTERVAL)
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            continue
-        try:
-            ensure_state_ready()
-            with _db() as conn:
-                from_tx_id = int(_get_state(conn, "last_summarized_tx_id", "0") or "0")
-                tx_rows = conn.execute(
-                    "SELECT * FROM transmissions WHERE id > ? ORDER BY id",
-                    (from_tx_id,),
-                ).fetchall()
-                if not tx_rows:
-                    continue
-                to_tx_id = tx_rows[-1]["id"]
-                lines = [row["raw_line"] for row in tx_rows]
-                current_incidents = incident_rows_from_db(conn)
-                incident_context = incident_board_context_from_incidents(current_incidents)
 
-            prompt = INCREMENTAL_JSON_TEMPLATE.format(
-                incident_context=incident_context,
-                block="\n".join(lines),
-            )
-            client = anthropic.AsyncAnthropic()
-            message = await client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            if message.stop_reason == "max_tokens":
-                sys.stderr.write("[auto-summary] hit max_tokens — skipping write\n")
-                continue
-            raw = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
-            updates = _validate_incident_updates(_parse_json_object(raw))
-            markdown = _incident_updates_markdown(updates)
-            completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with _db() as conn:
-                for inc in updates:
-                    _upsert_incident(conn, inc, completed_at, first_tx_id=from_tx_id + 1, last_tx_id=to_tx_id)
-                _set_state(conn, "last_summarized_tx_id", str(to_tx_id))
-                conn.execute(
-                    "INSERT INTO summary_jobs(mode, from_tx_id, to_tx_id, status, output, created_at, completed_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?)",
-                    ("auto", from_tx_id + 1, to_tx_id, "succeeded", markdown, completed_at, completed_at),
-                )
-            with open(LOG_FILE, "a") as f:
-                f.write(f"\n{SUMMARY_MARKER} {completed_at}\n{markdown}\n{'='*40}\n\n")
-            sys.stderr.write(f"[auto-summary] {completed_at}: processed {len(tx_rows)} lines, {len(updates)} incident updates\n")
-        except Exception as exc:
-            sys.stderr.write(f"[auto-summary] error: {exc}\n")
+async def _run_auto_summary_once():
+    ensure_state_ready()
+    with _db() as conn:
+        from_tx_id = int(_get_state(conn, "last_summarized_tx_id", "0") or "0")
+        tx_rows = conn.execute(
+            "SELECT * FROM transmissions WHERE id > ? ORDER BY id",
+            (from_tx_id,),
+        ).fetchall()
+        if not tx_rows:
+            return
+        to_tx_id = tx_rows[-1]["id"]
+        lines = [f"#{row['id']} {row['raw_line']}" for row in tx_rows]
+        current_incidents = incident_rows_from_db(conn)
+        incident_context = incident_board_context_from_incidents(current_incidents)
+
+    prompt = INCREMENTAL_JSON_TEMPLATE.format(
+        incident_context=incident_context,
+        block="\n".join(lines),
+    )
+    client = anthropic.AsyncAnthropic()
+    message = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    if message.stop_reason == "max_tokens":
+        sys.stderr.write("[auto-summary] hit max_tokens — skipping write\n")
+        return
+    raw = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
+    updates = _validate_incident_updates(_parse_json_object(raw))
+    markdown = _incident_updates_markdown(updates)
+    completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _db() as conn:
+        for inc in updates:
+            _upsert_incident(conn, inc, completed_at, first_tx_id=from_tx_id + 1, last_tx_id=to_tx_id)
+        _set_state(conn, "last_summarized_tx_id", str(to_tx_id))
+        conn.execute(
+            "INSERT INTO summary_jobs(mode, from_tx_id, to_tx_id, status, output, created_at, completed_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            ("auto", from_tx_id + 1, to_tx_id, "succeeded", markdown, completed_at, completed_at),
+        )
+    with open(LOG_FILE, "a") as f:
+        f.write(f"\n{SUMMARY_MARKER} {completed_at}\n{markdown}\n{'='*40}\n\n")
+    sys.stderr.write(f"[auto-summary] {completed_at}: processed {len(tx_rows)} lines, {len(updates)} incident updates\n")
 
 @app.on_event("startup")
 async def _startup():
@@ -796,6 +798,13 @@ def init_state_db() -> None:
             lng     REAL NOT NULL,
             cached_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS incident_tx (
+            incident_number INTEGER NOT NULL,
+            tx_id INTEGER NOT NULL,
+            time TEXT NOT NULL DEFAULT '',
+            talkgroup TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (incident_number, tx_id)
+        );
         """)
         try:
             conn.execute("ALTER TABLE transmissions ADD COLUMN wav_file TEXT")
@@ -877,6 +886,12 @@ def _last_valid_summary_tx_id_from_log() -> int:
     return last_summary_tx
 
 def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
+    """Incrementally append new log lines to the transmissions table.
+
+    Tx ids are stable (append-only) so incident_tx attribution stays valid.
+    If the log shrank (rotation/manual edit), fall back to a full rebuild —
+    incident_tx rows keep their (time, talkgroup) fallback columns for that case.
+    """
     rows = []
     if LOG_FILE.exists():
         for line in LOG_FILE.read_text(errors="replace").splitlines():
@@ -886,10 +901,15 @@ def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
             tx_id = len(rows) + 1
             tg = m.group(2)
             rows.append((tx_id, m.group(1), tg, _agency(tg), m.group(5), m.group(4), line))
-    conn.execute("DELETE FROM transmissions")
+    existing = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM transmissions").fetchone()["m"]
+    if len(rows) < existing:
+        sys.stderr.write(f"[tx-sync] log shrank ({len(rows)} < {existing}) — full rebuild, tx ids may shift\n")
+        conn.execute("DELETE FROM transmissions")
+        existing = 0
+    new_rows = rows[existing:]
     conn.executemany(
         "INSERT INTO transmissions(id, time, talkgroup, agency, text, wav_file, raw_line) VALUES(?, ?, ?, ?, ?, ?, ?)",
-        rows,
+        new_rows,
     )
     return len(rows)
 
@@ -987,6 +1007,18 @@ def _incident_by_number(conn: sqlite3.Connection, number: int) -> dict | None:
     ).fetchone()
     return _incident_row_to_api(row) if row else None
 
+def _tx_time_to_datetime_str(hms: str) -> str:
+    """Expand a HH:MM:SS log time to a full datetime string (today, with midnight-wrap guard)."""
+    try:
+        t = datetime.strptime(hms, "%H:%M:%S")
+    except ValueError:
+        return ""
+    now = datetime.now()
+    dt = now.replace(hour=t.hour, minute=t.minute, second=t.second, microsecond=0)
+    if dt > now + timedelta(minutes=5):  # tx logged before midnight, applied after
+        dt -= timedelta(days=1)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
 def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id: int = 0, last_tx_id: int = 0) -> None:
     number = int(inc["number"])
     details = inc.get("details") or []
@@ -1003,6 +1035,32 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     first_seen = row["first_seen"] if row else now
     stored_first_tx_id = int(row["first_tx_id"]) if row and row["first_tx_id"] else 0
     stored_last_tx_id  = int(row["last_tx_id"])  if row and row["last_tx_id"]  else 0
+
+    # Per-incident attribution: last_seen comes from the newest attributed
+    # transmission's timestamp, not the summary clock. Fall back to `now`
+    # (legacy behavior) when the model returned no tx_ids.
+    tx_ids = inc.get("tx_ids") or []
+    last_seen = now
+    if tx_ids:
+        placeholders = ",".join("?" * len(tx_ids))
+        attributed = conn.execute(
+            f"SELECT id, time, talkgroup FROM transmissions WHERE id IN ({placeholders}) ORDER BY id",
+            tx_ids,
+        ).fetchall()
+        if attributed:
+            conn.executemany(
+                "INSERT OR IGNORE INTO incident_tx(incident_number, tx_id, time, talkgroup) VALUES(?, ?, ?, ?)",
+                [(number, t["id"], t["time"], t["talkgroup"]) for t in attributed],
+            )
+            newest = _tx_time_to_datetime_str(attributed[-1]["time"])
+            if newest:
+                last_seen = newest
+            if not row:  # new incident: first_seen from its earliest attributed line
+                oldest = _tx_time_to_datetime_str(attributed[0]["time"])
+                if oldest:
+                    first_seen = oldest
+            first_tx_id = attributed[0]["id"]
+            last_tx_id  = attributed[-1]["id"]
     effective_first_tx_id = stored_first_tx_id if stored_first_tx_id else first_tx_id
     effective_last_tx_id  = max(stored_last_tx_id, last_tx_id)
     conn.execute(
@@ -1033,7 +1091,7 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
             json.dumps([str(d).strip() for d in details if str(d).strip()][:8]),
             str(inc.get("action") or "").strip(),
             first_seen,
-            now,
+            last_seen,
             now,
             effective_first_tx_id,
             effective_last_tx_id,
@@ -1456,7 +1514,7 @@ You update a live incident board for Tippecanoe County public safety radio traff
 Existing incident board:
 {incident_context}
 
-New transmissions since the last successful summary (format [HH:MM:SS] [TALKGROUP] [trunk:tippecanoe|safet] transcript).
+New transmissions since the last successful summary (format #ID [HH:MM:SS] [TALKGROUP] [trunk:tippecanoe|safet] transcript).
 Trunk "tippecanoe" = Tippecanoe County P25. Trunk "safet" = Indiana SAFE-T (ISP/INDOT).
 {block}
 
@@ -1471,6 +1529,7 @@ Return JSON only, with no markdown and no preamble. The JSON shape is:
       "location": "pure mappable address/place only, or Unknown",
       "details": ["one short fact from the new transmissions", "optional second short fact"],
       "priority": 3,
+      "tx_ids": [101, 104, 109],
       "action": "what remains unresolved or what to watch for. If a person's name (suspect, subject, driver, wanted person) was mentioned, append a MyCase link: [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both label and query params."
     }}
   ]
@@ -1489,6 +1548,11 @@ Rules:
 - Location must be a pure mappable address/place only, or Unknown. Put uncertainty and context in details.
 - Keep each incident concise: at most two details.
 - priority is 1-5 urgency: 1=critical/life-threatening, 2=serious/major, 3=moderate (default), 4=non-urgent, 5=routine/minor. Use the existing board value (shown as P# in the board context) if unchanged. Update it if new traffic changes severity. When marking CLEAR, set priority to 4 or 5.
+- tx_ids: list the #ID numbers of the transmissions above that belong to this incident. Be liberal —
+  attribute garbled, partial, or ambiguous lines to the most plausible incident based on talkgroup,
+  timing, and adjacent traffic. A best guess is better than omitting the line. A line may appear in
+  more than one incident's tx_ids if genuinely shared. Only leave a line unattributed when it is pure
+  noise or administrative chatter unrelated to any incident.
 - IMPORTANT: When a person's name appears in the transmissions, you MUST include a MyCase link in the action field. Use the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) with the real name in both the label and the query params.
 - If there are no incident updates, return {{"incidents":[]}}.
 """
@@ -1585,6 +1649,10 @@ def _validate_incident_updates(payload: dict) -> list[dict]:
             details = [details]
         if not isinstance(details, list):
             raise ValueError(f"Incident {number} details must be a list")
+        tx_ids = inc.get("tx_ids") or []
+        if not isinstance(tx_ids, list):
+            tx_ids = []
+        tx_ids = sorted({int(t) for t in tx_ids if isinstance(t, (int, float)) and int(t) > 0})
         valid.append({
             "number": number,
             "title": title,
@@ -1594,6 +1662,7 @@ def _validate_incident_updates(payload: dict) -> list[dict]:
             "details": [str(d).strip() for d in details if str(d).strip()][:2],
             "action": str(inc.get("action") or "").strip(),
             "priority": max(1, min(5, int(inc.get("priority") or 3))),
+            "tx_ids": tx_ids,
         })
     return valid
 
@@ -1634,6 +1703,24 @@ def update_incident(number: int, req: IncidentUpdateReq, auth: dict = Depends(re
         }
         _upsert_incident(conn, inc, now)
         return JSONResponse(_incident_by_number(conn, number), headers={"Cache-Control": "no-store"})
+
+@app.get("/api/incidents/{number}/transcript")
+def incident_transcript(number: int, auth: dict = Depends(require_auth)):
+    """Transmissions attributed to this incident by the summarizer (AI attribution)."""
+    ensure_state_ready()
+    with _db() as conn:
+        if not conn.execute("SELECT 1 FROM incident_state WHERE number = ?", (number,)).fetchone():
+            raise HTTPException(404, detail=f"Incident {number} not found")
+        rows = conn.execute(
+            "SELECT t.id, t.time, t.talkgroup, t.agency, t.text, t.wav_file "
+            "FROM incident_tx it JOIN transmissions t ON t.id = it.tx_id "
+            "WHERE it.incident_number = ? ORDER BY t.id",
+            (number,),
+        ).fetchall()
+        return JSONResponse(
+            {"number": number, "transmissions": [dict(r) for r in rows]},
+            headers={"Cache-Control": "no-store"},
+        )
 
 @app.get("/api/users")
 def list_users(auth: dict = Depends(require_auth)):
@@ -1681,7 +1768,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 (from_tx_id,),
             ).fetchall()
             to_tx_id = tx_rows[-1]["id"] if tx_rows else from_tx_id
-            lines = [row["raw_line"] for row in tx_rows]
+            lines = [f"#{row['id']} {row['raw_line']}" for row in tx_rows]
     else:
         try:
             check_summary_rate_limit(auth)
@@ -1705,7 +1792,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 (from_tx_id,),
             ).fetchall()
             to_tx_id = tx_rows[-1]["id"] if tx_rows else from_tx_id
-            lines = [row["raw_line"] for row in tx_rows]
+            lines = [f"#{row['id']} {row['raw_line']}" for row in tx_rows]
 
     async def stream_empty():
         yield f"data: {json.dumps({'done':True,'text':'No new traffic since last summary.'})}\n\n"
