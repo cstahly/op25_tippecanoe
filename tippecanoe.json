@@ -43,7 +43,7 @@
             "frequency": 855400000,
             "offset": 0,
             "ppm": 0.0,
-            "rate": 16000000,
+            "rate": 12000000,
             "usable_bw_pct": 0.85,
             "tunable": false
         }
