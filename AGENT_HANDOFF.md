@@ -289,3 +289,24 @@ No existing radio is type-accepted for GMRS (HackRF cannot legally transmit on G
     python3 ~/src/satellites-overhead/hackrf_am_demod.py | \
     sox -t raw -r 16000 -e signed -b 16 -c 1 - -d
   ```
+
+---
+
+## 11. sadbabyrabbit.com EC2 (main site, NOT p25)
+
+- EC2 `i-0cf37dcf3d7a3a8a5` us-east-2, IP 3.148.96.123, **1GB RAM**. SSH:
+  `ssh -i ~/.ssh/sadbabyrabbit.pem ec2-user@sadbabyrabbit.com`.
+- Next.js site at `/var/www/site`, served by pm2 cluster "site" (port 3000) behind nginx.
+  No git repo on the box — source lives only there. Meteor gallery images in `/var/www/meteor/`.
+- **NEVER run `npm run build` on the EC2.** The Turbopack build OOMs the 1GB box into
+  swap-death — took the whole site down 2026-06-10, needed a hard reboot, and the
+  interrupted build deleted the production `.next`. Build procedure:
+  1. `rsync` source (exclude `node_modules`, `.next`) to local `/tmp/site-build`
+  2. `npm ci && npm run build` locally
+  3. `rsync --delete /tmp/site-build/.next/ ec2:/var/www/site/.next/`
+  4. `pm2 restart site` on the EC2
+- Meteor gallery: scheduler's `push_meteor_image()` pushes full PNG + 1600px WebP
+  (`{ts}_web.webp`, "web" field in index.json). Gallery `<img>` uses the WebP (lazy-loaded),
+  full PNG via click-through. Raw PNGs are 4–14MB — serving them directly tripped the
+  CloudWatch NetworkOut alarm (>50MB/5min). WebP gallery load is ~3MB total; alarm
+  threshold left at 50MB intentionally.
