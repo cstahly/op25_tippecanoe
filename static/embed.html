@@ -60,11 +60,11 @@ a:hover { text-decoration: underline; }
 .incident[data-kind="active"] { border-left-color: var(--active); }
 .incident[data-kind="watch"]  { border-left-color: var(--watch); }
 .incident[data-kind="clear"]  { border-left-color: var(--clear); opacity: .65; }
-.incident[data-priority="1"]  { border-top: 2px solid rgba(248,81,73,.7); }
-.incident[data-priority="2"]  { border-top: 2px solid rgba(210,153,34,.55); }
-.incident[data-priority="3"]  { border-top: 2px solid rgba(234,179,8,.4); }
-.incident[data-priority="4"]  { border-top: 2px solid rgba(88,166,255,.3); }
-.incident[data-priority="5"]  { border-top: 2px solid rgba(107,114,128,.25); }
+.incident[data-priority="1"]  { border-top: 3px solid #ef4444; box-shadow: 0 -1px 6px rgba(239,68,68,.35); }
+.incident[data-priority="2"]  { border-top: 3px solid #f97316; }
+.incident[data-priority="3"]  { border-top: 3px solid #eab308; }
+.incident[data-priority="4"]  { border-top: 3px solid #0ea5e9; }
+.incident[data-priority="5"]  { border-top: 3px solid #475569; }
 .incident.highlighted { outline: 1px solid var(--tc); transition: outline-color 3s ease; }
 .prio-badge { font-size: 10px; font-weight: 800; border-radius: 3px; padding: 1px 5px; }
 .prio-badge.p2 { background: rgba(210,153,34,.2); color: var(--watch); }
