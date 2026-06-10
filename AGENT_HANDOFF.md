@@ -1,6 +1,6 @@
-# P25 System — Agent Handoff
+# P25 / SDR System — Agent Handoff
 
-Last updated: 2026-06-06 (satellite scheduler session). Read before changing anything.
+Last updated: 2026-06-09 (evening session). Read before changing anything.
 
 Hardware is a Kali bare-metal box. Full sudo is available. OP25 runs as a user terminal
 process; the web app runs under systemd.
@@ -12,344 +12,220 @@ process; the web app runs under systemd.
 | System | Status | Notes |
 |--------|--------|-------|
 | OP25 decoder | Operational | Running as `python3 multi_rx.py -v 1 -c /home/cstahly/op25_tippecanoe/tippecanoe.json` |
-| Whisper STT | Operational | `turbo`, CPU, int8. Do not use CUDA. |
+| Whisper STT | Operational | `turbo`, CPU, int8. Do not use CUDA — kills RDP display. |
 | Web app | Operational | `p25-server.service`, HTTPS via nginx |
 | Incident state DB | Operational | `~/op25_tippecanoe/p25_state.db` |
-| Satellite scheduler | **Active** | systemd service `sdr-scheduler.service`; rules live in `~/sdr_scheduler_rules.json` |
-
-Current DB snapshot at handoff:
-
-- `transmissions`: 3015
-- `incident_state`: 171
-- `last_summarized_tx_id`: 2857
-- `summary_jobs`: 13
-- stale incidents: 101
-
-Latest relevant commits:
-
-- `0671099 Age out stale incidents from summary context`
-- `1ca7233 Compact incident context for summaries`
-- `dc7eae1 Stabilize incident rendering and feed expansion`
-- `4668f7c Add incident detail controls and filters`
-- `28b4c1e Add SQLite incident state for summaries`
-
-Repo `~/op25_tippecanoe` is clean at handoff. Repo `~/src/op25` has a pre-existing modified
-`CMakeLists.txt`; do not touch/revert it unless user asks.
+| Satellite scheduler | **Active** | system `sdr-scheduler.service`; rules in `~/sdr_scheduler_rules.json` |
+| SAWbird+ NOAA 137 | **In chain** | Confirmed working — LED lit during captures. Powered via bias-tee. |
 
 ---
 
 ## 2. OP25 / STT
 
-User’s normal OP25 command:
+User's normal OP25 command:
 
 ```bash
 cd ~/src/op25/op25/gr-op25_repeater/apps && python3 multi_rx.py -v 1 -c ~/op25_tippecanoe/tippecanoe.json 2>~/op25_tippecanoe/stderr.log
 ```
 
-Handoff previously listed a `cd ~/op25_tippecanoe` variant, but the user specifically runs the
-command above. Be careful with relative paths:
-
-- `tippecanoe.json` uses `tgid_tags_file: "trunk-tags.tsv"`.
-- Running from the OP25 apps dir can make OP25 log `read_tags_file` missing unless OP25 resolves
-  relative to config or the user has adapted around it. Do not restart OP25 unless necessary.
-
-`stt_audio.py`:
-
-- Path: `~/src/op25/op25/gr-op25_repeater/apps/stt_audio.py`
-- Buffers OP25 UDP audio, transcribes with faster-whisper, appends TX lines to `p25_log.txt`.
-- Whisper: `turbo`, CPU, int8.
-- It currently includes a small `initial_prompt` asking Whisper to label clear non-speech audio
-  events like `[tone]`, `[siren]`, `[static]`, `[unintelligible]`.
-- Audio FIFO: `/tmp/p25_audio.fifo`; used by web app for MP3 live audio stream.
+- `tippecanoe.json` uses `tgid_tags_file: "trunk-tags.tsv"` — relative path matters, run from apps dir.
+- Do not restart OP25 unless necessary.
+- HackRF One serial `14d463dc2f209de1` is the P25 radio — **never touch for satellite work**.
 
 Tippecanoe config:
-
 - File: `~/op25_tippecanoe/tippecanoe.json`
 - HackRF gains: `RF:14,IF:16,BB:32`
 - PPM: `0.0`
 - Control channels: 851.05000, 853.83750, 857.73750 MHz
 
+`stt_audio.py`:
+- Path: `~/src/op25/op25/gr-op25_repeater/apps/stt_audio.py`
+- Whisper: `turbo`, CPU, int8
+- Audio FIFO: `/tmp/p25_audio.fifo`
+
 ---
 
-## 3. Web App Architecture
+## 3. Web App
 
 URL: `https://p25.sadbabyrabbit.com`
 
-Service:
+**Do not overwrite `/etc/p25-server.env`** — contains `P25_USER`, `P25_PASSWORD`, `ANTHROPIC_API_KEY`, `P25_EXTRA_USERS`.
 
+Service:
 ```ini
 [Service]
 User=cstahly
 WorkingDirectory=/home/cstahly/op25_tippecanoe
 EnvironmentFile=/etc/p25-server.env
 ExecStart=/usr/bin/python3 -m uvicorn p25_server:app --host 127.0.0.1 --port 8765
-Restart=always
-RestartSec=5
 ```
 
-Do not overwrite `/etc/p25-server.env`. It contains:
-
-- `P25_USER`
-- `P25_PASSWORD`
-- `ANTHROPIC_API_KEY`
-- `P25_EXTRA_USERS`
-
-Auth:
-
-- Basic auth stored in sessionStorage as `p25_auth`
-- Bearer token for QR/share links and audio URL query param
-- Primary user can generate share QR and run full summaries
-- Viewer user has rate limits
+State DB: `~/op25_tippecanoe/p25_state.db` — safe to rebuild from log if wedged, but do not delete casually (manual status edits live in DB).
 
 ---
 
-## 4. State DB Model
+## 4. Satellite Scheduler
 
-Important: `p25_log.txt` is now an audit/source log, not the application state cursor.
+### Service
 
-SQLite file:
-
-```text
-~/op25_tippecanoe/p25_state.db
+System service (not user service). Managed with:
+```bash
+sudo systemctl restart sdr-scheduler
+sudo systemctl status sdr-scheduler
 ```
 
-Tables:
-
-- `transmissions`: parsed raw TX lines from `p25_log.txt`
-- `incident_state`: current board keyed by Claude-owned incident number
-- `app_state`: cursor values, especially `last_summarized_tx_id`
-- `summary_jobs`: audit records for summary attempts
-
-The server calls `ensure_state_ready()` to rebuild/sync transmissions from `p25_log.txt`. It is
-safe to move/delete `p25_state.db` and let it rebuild from the log if schema/data gets wedged,
-but do not do that casually because manual status edits live in the DB.
-
-`/api/state` now serves incidents from `incident_state`. It only falls back to old parsed summaries
-if DB incidents are empty.
-
-Manual incident status updates:
-
-```http
-POST /api/incidents/{number}
-```
-
-Body can include `status`, `title`, `agency`, `location`, `details`, `action`. The common UI action
-is setting `status` to `CLEAR`, `ACTIVE`, `PENDING`, or `ROUTINE`. Backend recalculates and persists
-`status_kind`.
-
----
-
-## 5. Summarization
-
-Model: `claude-sonnet-4-6`.
-
-Regular incremental summaries:
-
-- Use SQLite cursor `last_summarized_tx_id`, not summary markers.
-- Send compact current incident context plus raw TX rows with `id > last_summarized_tx_id`.
-- Claude returns JSON only.
-- Server validates JSON and updates `incident_state`.
-- Only after successful validation does it advance `last_summarized_tx_id`.
-- Failed/truncated/invalid summaries write failed `summary_jobs` rows and do not advance the cursor.
-- A readable markdown summary is still appended to `p25_log.txt` for audit/feed display.
-
-Full summaries:
-
-- Still use the earlier chunked markdown path.
-- Primary user only.
-- Consider this legacy compared with the DB-backed incremental flow.
-- Do not rely on full-summary markers for state.
-
-Stale/timeout behavior:
-
-- Env/default: `P25_STALE_INCIDENT_SECONDS = 4h`.
-- Non-clear incidents older than this are marked `is_stale: true` in API output.
-- Stale does not overwrite actual `status`.
-- UI has a Stale filter; default Open excludes stale and clear incidents.
-- Prompt context includes fresh open incidents, a small stale-open tail, and recently cleared items.
-
-Current cost/cap notes:
-
-- After compact/stale context, current rough incremental input prompt measured about 5k tokens with
-  a large pending queue.
-- SWAG cost after optimization: about `$0.025-$0.04` per incremental summary.
-- User is considering around `$20/mo` max. Suggested schedule: every 2 hours, with manual summaries
-  as needed.
-
----
-
-## 6. Frontend Notes
-
-Static files:
-
-- `static/index.html`
-- `static/sw.js`
-
-Current visible app version: `v19`.
-Current service worker cache: `p25-v22`.
-
-Incident UI:
-
-- Search box for text matching.
-- Status filters: Open, Active, Watch, Stale, Routine, Clear, All.
-- Rows click into a detail modal.
-- Modal supports status changes via `/api/incidents/{number}`.
-- Address links are map links.
-- Rendering was fixed so polling does not rewrite the incident DOM unless incident data changes;
-  this avoids layout jitter from address-link relayout.
-
-Feed UI:
-
-- Log cards have delegated expand/collapse handler.
-- Avoid reintroducing per-card click handlers plus delegated handlers; that broke show-more once.
-
----
-
-## 7. Known Issues / Cautions
-
-1. **Many stale active incidents**: 101 stale at handoff. This is expected after migration. User can
-   manually clear important ones, or a future agent can add bulk close/age-out tools.
-2. **Full summaries are legacy**: full-summary path is chunked for rate limits but not yet DB-native.
-3. **Incident context may miss old omitted incidents**: stale tail mitigates this, but a very old
-   incident referenced after many hours may get a new number. This is acceptable for cost control
-   for now.
-4. **Do not let bad Claude output advance state**: preserve the JSON validation + cursor-advance
-   ordering.
-5. **Do not restart OP25 casually**: user runs it manually and may be watching live traffic.
-6. **OP25 repo dirty file**: `~/src/op25/CMakeLists.txt` is modified and unrelated.
-7. **Satellite background summary thread**: dies silently; always run `sat_iq_summary.py` manually
-   to check results. See Section 8.
-8. **SO-50 zero-burst passes**: can be legit (nobody uplinked CTCSS to activate the repeater) or
-   a detection issue. Don't assume antenna problem without checking noise RMS in the WAV first.
-
----
-
-## 8. Satellite Scheduler
-
-### Service and config
-
-- **Service**: `~/.config/systemd/user/sdr-scheduler.service`
+- **Unit file**: `/etc/systemd/system/sdr-scheduler.service`
 - **Script**: `~/src/satellites-overhead/scheduler/sdr_scheduler.py`
 - **Rules file**: `~/sdr_scheduler_rules.json`
-- **Captures dir**: `~/cosmos_captures/`
-- **Location**: Lafayette, IN, ~40.42 N, 86.88 W
-
-Service runs as user systemd. Restart:
-
-```bash
-systemctl --user restart sdr-scheduler.service
-journalctl --user -u sdr-scheduler.service -f
-```
+- **Captures**: `~/noaa_captures/` (Meteor LRPT), `~/cosmos_captures/` (other sats)
+- **Log**: `~/sdr_scheduler.log`
+- **Location**: Lafayette, IN — 40.4259°N, 86.9081°W
 
 ### RTL-SDR hardware
 
-- RTL-SDR v3 (USB, idVendor 0bda / idProduct 2838) for satellite work.
-- HackRF One serial `14d463dc2f209de1` is primary for P25 — do not touch for satellite work.
-- Antenna: outdoor horizontal V-dipole cut for 145 MHz (53.7 cm arms), mounted on house.
-  - Good coverage from horizon to ~50-60° elevation.
-  - Has a pattern null directly overhead (horizontal null). High-elevation passes (>70°) will
-    show reduced signal. QFH antenna (antennas.us UC-1464-531, $288) is on the user's radar
-    but not yet ordered.
+- RTL-SDR v3 (USB, SN 00000001) for satellite work
+- SAWbird+ NOAA 137 LNA in chain — powered via bias-tee (`rtl_biast -d 0 -b 1` before capture, `-b 0` after)
+- Antenna: outdoor V-dipole on 12' painter's pole, cut for 145 MHz
 
-### Critical fixed bugs (do not reintroduce)
+### Active rules (as of 2026-06-09)
 
-1. **USB autosuspend**: Linux was killing the RTL-SDR between passes. Fixed via udev rule at
-   `/etc/udev/rules.d/99-rtlsdr-autosuspend.rules` — sets `power/autosuspend=-1` for the device.
-   Do not remove this file.
+Only 137 MHz rules are enabled. All 145/435 MHz rules disabled pending Nooelec LaNA arrival.
 
-2. **Duplicate scheduler instances**: Two instances racing on the same USB device caused
-   `usb_claim_interface error -6`. Fixed with `fcntl.flock(LOCK_EX|LOCK_NB)` PID lock on
-   `~/.sdr_scheduler.pid`. The scheduler also kills any orphaned `rtl_sdr` processes before
-   each capture.
+| NORAD | Name | Freq | bias_tee | Notes |
+|-------|------|------|----------|-------|
+| 57166 | METEOR-M2 3 | 137.9 MHz | true | Primary target |
+| 59051 | METEOR-M2 4 | 137.9 MHz | true | **Off-air** — 0 CADU on every pass, do not waste time debugging |
 
-3. **RTL-SDR gain**: Optimal gain is **37 dB**. At 49 dB, receiver noise floor was ~7800 RMS;
-   at 37 dB it drops to ~121. All rules in `sdr_scheduler_rules.json` have `lna_gain: 37`.
-   Do not raise gain chasing signal — it raises noise faster than signal.
+All other rules (`enabled: false`): AO-73, AO-7, AO-91, PO-101, JO-97, CAS-6, SO-50, FO-29, RS-44, ISS.
 
-4. **Noise floor calibration bug** (fixed 2026-06-06): `find_bursts()` in `sat_iq_summary.py`
-   used the first 10 seconds of audio as the noise floor baseline. At high-elevation passes the
-   satellite is already strong at AOS, so the "noise floor" was contaminated with signal, inflating
-   the threshold and suppressing real detections. Fixed to use **10th-percentile of all per-window
-   RMS values** instead.
+Re-enable non-137 MHz rules after Nooelec LaNA arrives and is in chain. LaNA does NOT need bias-tee (it has its own power). SAWbird+ NOAA does need bias-tee. Decide chain config before re-enabling.
 
-5. **Background summary thread dying silently**: The scheduler spawns a daemon thread to run
-   `sat_iq_summary.py` after each capture. This thread can die without logging. **Always run
-   `sat_iq_summary.py` manually** when checking pass results; do not trust the auto-generated
-   `_summary.md` to exist.
+### Bias-tee operation
 
-### Gain and noise floor reference
+The installed `rtl_sdr` build does not support `-T` flag. Use `rtl_biast` separately:
 
-| Gain (dB) | Noise RMS (WAV int16) |
-|---|---|
-| 49 | ~7800 |
-| 40 | ~823 |
-| 37 | ~121 |
-
-### Active capture rules (all enabled)
-
-| NORAD | Name | Freq | Profile | Notes |
-|---|---|---|---|---|
-| 27607 | SO-50 | 145.850 MHz | raw_iq_rtlsdr | FM repeater; needs CTCSS uplink |
-| 25338 | ISS | 145.825 MHz | raw_iq_rtlsdr | APRS digipeater |
-| 39444 | AO-73 (FUNcube-1) | 145.950 MHz | raw_iq_rtlsdr | SSB/CW linear |
-| 24278 | FO-29 | 435.800 MHz | raw_iq_rtlsdr | SSB/CW linear; min_peak_el=40 |
-| 44909 | RS-44 | 435.640 MHz | raw_iq_rtlsdr | SSB/CW linear; min_peak_el=40 |
-| 7530 | AO-7 | 435.100 MHz | raw_iq_rtlsdr | SSB/CW linear; min_peak_el=40 |
-| M2-2,3,4 | Meteor-M | 137.9/137.1 MHz | meteor_lrpt_rtlsdr | LRPT imagery |
-
-### Post-pass analysis: `sat_iq_summary.py`
-
-Location: `~/src/satellites-overhead/sat_iq_summary.py`
-
-For FM birds (SO-50, ISS):
 ```bash
-python3 sat_iq_summary.py <file.wav> --norad 27607
+rtl_biast -d 0 -b 1   # before capture
+rtl_biast -d 0 -b 0   # after capture
 ```
 
-For SSB/CW linear transponder birds (FO-29, RS-44, AO-7, AO-73):
-```bash
-python3 sat_iq_summary.py <file.wav> --norad 24278 --mode ssb --center_hz 435800000
-```
+The scheduler's `rtl_sdr_capture()` handles this automatically when `bias_tee=True` in the rule. The SAWbird+ LED should be lit during every M2-3 and M2-4 capture.
 
-Auto-mode picks SSB for NORAD IDs `{24278, 44909, 7530, 39444}`, FM otherwise.
+### Bugs fixed in this session (2026-06-09)
 
-The SSB path (`ssb_scan_file`) reads CU8 IQ, runs FFT energy scan, finds peak offset, bins
-into 50 kHz slots, and writes a USB-demodded WAV. It reports peak SNR (5–6× = carrier
-detected, no voice; >8× suggests actual SSB audio).
+1. **Blocking satdump decode**: `rtlsdr_satdump_decode()` was calling `proc.wait()` on the satdump process, blocking the scheduler's main loop and causing it to miss subsequent passes. **Fixed**: satdump now runs in a background thread (`threading.Thread(target=_run_decode, daemon=False).start()`). The function returns 0 immediately after launching the thread; DECODE DONE is logged asynchronously.
+
+2. **satdump TLE fetch loop**: satdump is hardcoded to fetch TLEs from `http://celestrak.org` port 80, which is unreachable. When the fetch fails, satdump retries indefinitely and never decodes. **Fixed**: `refresh_satdump_tles()` runs before every satdump invocation. It tries alternate sources (5s timeout each), falls back to the scheduler's `.tlecache/active.tle`, then stamps `tles_last_updated` in `~/.config/satdump/settings.json` to now. satdump sees fresh TLEs and skips its own fetch. The stamp lasts 24 hours (satdump's default update interval); since `refresh_satdump_tles()` runs before every decode, it stays current indefinitely.
 
 ### Meteor LRPT decode pipeline
 
-satdump live RTL-SDR source is broken (`Could not find a handler for source type: rtlsdr!`).
-The working pipeline: capture CU8 IQ with `rtl_sdr`, then decode offline:
+satdump live RTL-SDR source is broken. Working pipeline: capture CU8 IQ with `rtl_sdr`, decode offline:
 
 ```bash
+# Must use --samplerate 2000000 — rtl_sdr captures at 2 MS/s, not 1 MS/s
 satdump meteor_m2-x_lrpt baseband <file.iq> <outdir> \
-  --samplerate 1000000 --baseband_format cu8 --iq_swap --dc_block
+  --samplerate 2000000 --baseband_format cu8 --iq_swap --dc_block
 ```
 
-The scheduler handles this automatically via `rtlsdr_satdump_decode()` when profile is
-`meteor_lrpt_rtlsdr`. Look for `.cadu` files in the output directory to confirm decode success.
+Before running satdump manually, bump the TLE timestamp first:
+```python
+python3 -c "
+import json, time
+f = open('/home/cstahly/.config/satdump/settings.json', 'r+')
+c = json.load(f); c.setdefault('user', {})['tles_last_updated'] = int(time.time())
+f.seek(0); json.dump(c, f, indent=4); f.truncate()
+"
+```
 
-### Pending satellite work
+### M2-3 decode status (as of 2026-06-09)
 
-- **Elevation priority for partial runs**: When scheduler has a device conflict and must choose
-  which pass to run, it should prefer higher peak elevation. Not yet implemented.
-- **Background summary thread reliability**: Consider replacing daemon thread with a subprocess
-  call that has proper logging to a file.
-- **QFH antenna**: antennas.us UC-1464-531 ($288) — user considering for better overhead coverage.
-- **Verify Meteor LRPT decode**: pipeline was fixed but hasn't had a confirmed successful pass yet.
-  Check `~/cosmos_captures/` for `.cadu` output after each Meteor pass.
-- **High-elevation SO-50 test**: 2026-06-07 ~09:32 UTC (5:32 AM EDT) SO-50 at 79.8° will be
-  the first high-elevation pass at correct 37 dB gain. Check it when it comes in.
+No successful decodes with SAWbird+ yet. All captures tonight:
+- 28.8° automated pass: 0 CADU, no lock — low elevation may be insufficient with current antenna
+- 45.4° manual pass: 0 CADU, no lock — capture started after LOS (missed due to scheduler blocking bug, now fixed)
+
+Previously confirmed working (before SAWbird+, 2026-06-07): successful decodes at 41.7° and 79.9° passes. Best images at `~/noaa_captures/meteor_m2_3_1113_decode/MSU-MR/`.
+
+### Critical fixed bugs from earlier sessions (do not reintroduce)
+
+1. **USB autosuspend** — fixed via `/etc/udev/rules.d/99-rtlsdr-autosuspend.rules`
+2. **Duplicate scheduler instances** — fixed with `fcntl.flock` PID lock on `~/.sdr_scheduler.pid`
+3. **RTL-SDR gain** — optimal is 37 dB. At 49 dB noise floor is ~7800 RMS. Do not raise gain.
+4. **Samplerate bug** — always `2000000`, not `1000000`. Fixed 2026-06-07.
+5. **Noise floor calibration** — `sat_iq_summary.py` uses 10th-percentile RMS, not first-10s baseline.
 
 ---
 
-## 9. Misc Hardware / Tools
+## 5. Incoming Hardware
 
-KLAF manual AM monitoring:
+| Item | ETA | Notes |
+|------|-----|-------|
+| Nooelec LaNA (standard, NOT WB) | 2026-06-10 | Wideband LNA 20MHz-4GHz. Does NOT need bias-tee. Re-enable all disabled sat rules after chain is configured. |
+| Arrow Antenna II 440-3 Yagi | 2026-06-13 (Fri) | 3-el 70cm Yagi. Fixed mount facing ENE (35.5% of elevation-weighted passes) based on 97-pass analysis. |
+| LiteVNA | 2026-06-13 (Fri) | For antenna sweep/characterization |
 
-```bash
-hackrf_transfer -f 127750000 -s 2000000 -r - | \
-  python3 ~/src/satellites-overhead/hackrf_am_demod.py | \
-  sox -t raw -r 16000 -e signed -b 16 -c 1 - -d
-```
+---
+
+## 6. Hardware Inventory
+
+- **HackRF One** (serial `14d463dc2f209de1`) — P25 only, do not use for satellite
+- **RTL-SDR v3 #1** (SN 00000001) — satellite scheduler
+- **RTL-SDR v3 #2** — ADS-B / piaware at 1090 MHz (second dongle, FA ADS-B antenna)
+- **SAWbird+ NOAA 137** — inline on V-dipole → RTL-SDR #1, bias-tee powered
+- **Nooelec LaNA** — arriving tomorrow; wideband, no bias-tee needed
+- **Kenwood TR-7400A** — 2m FM rig, working. Speaker connected. No tone pad yet.
+- **Heltec LoRa32 V4** — purchased, not set up. Meshtastic target, 915 MHz ISM.
+- **V-dipole 145 MHz** — outdoor on 12' painter's pole, active for satellite work
+- **V-dipole 8.8cm telescoping arms** — currently on P25 monitor. Arms extend — usable for 462 MHz if extended to ~16cm.
+- **FA ADS-B antenna** — on RTL-SDR #2 / piaware
+
+---
+
+## 7. Kenwood TR-7400A
+
+- **Mic connector**: 4-pin square DIN (NOT 8-pin — confirmed from physical inspection)
+- **Tone pad connector**: proprietary multi-pin (NOT 3.5mm)
+- **PL tones**: hardware module, not programmable. Module L79-0418-05 = 131.8 Hz.
+- **Tone knob**: controls receive CTCSS squelch (not transmit)
+- **Duplex**: DUP/RPT switch enables ±600 kHz TX offset for repeater operation
+- Speaker jack works. EXT SP requires 8Ω speaker, not headphones.
+
+Local repeaters (Lafayette/West Lafayette, IN):
+| Freq | Call | PL | Notes |
+|------|------|----|-------|
+| 146.730 | W9ARP | None | Easiest to try first — no tone needed |
+| 146.760 | W9YB | 131.8 Hz | Purdue club, most active |
+| 147.135 | WI9RES | 131.8 Hz | Also 131.8 Hz |
+
+---
+
+## 8. GMRS / 462 MHz Antenna
+
+User is researching GMRS. License: $35, no exam, covers immediate family, 10 years.
+No existing radio is type-accepted for GMRS (HackRF cannot legally transmit on GMRS).
+
+462 MHz quarter-wave ground plane (calculated at 462.000 MHz, VF 0.95):
+- Whip: **15.4 cm**
+- Radials (drooped 45°): **17.3 cm**
+
+---
+
+## 9. ADS-B
+
+- piaware running on this machine, second RTL-SDR + FA ADS-B antenna
+- Moving antenna to better height dramatically improved range
+- UAT 978 MHz deferred — needs 3rd RTL-SDR dongle
+- MLAT: small antenna position moves on same property don't require reconfiguration
+
+---
+
+## 10. Misc
+
+- **Do not overwrite `/etc/p25-server.env`**
+- **Do not use CUDA for Whisper** — shares GPU with RDP encoder, kills display
+- **OP25 repo**: `~/src/op25/CMakeLists.txt` is modified — do not revert
+- KLAF manual AM monitoring:
+  ```bash
+  hackrf_transfer -f 127750000 -s 2000000 -r - | \
+    python3 ~/src/satellites-overhead/hackrf_am_demod.py | \
+    sox -t raw -r 16000 -e signed -b 16 -c 1 - -d
+  ```
