@@ -1668,7 +1668,9 @@ def _chunk_lines(lines: list[str], max_chars: int = 80000) -> list[list[str]]:
     return chunks
 
 CLAUDE_CLI = os.path.expanduser("~/.local/bin/claude")
-FULL_CLI_MAX_CHARS = 3_400_000   # ~850K tokens; keep the most recent transcript if over
+# claude -p double-counts piped stdin (conversation + attachment content) against its
+# 1M-token request limit, so the usable prompt budget is just under 500K tokens.
+FULL_CLI_MAX_CHARS = 1_800_000   # ~450K tokens -> ~900K after doubling; keep most recent
 FULL_CLI_TIMEOUT_S = 1800
 
 async def _claude_cli_text(prompt: str, model: str = "opus") -> str:
@@ -1689,7 +1691,8 @@ async def _claude_cli_text(prompt: str, model: str = "opus") -> str:
         proc.kill()
         raise RuntimeError(f"claude CLI timed out after {FULL_CLI_TIMEOUT_S}s")
     if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI exited {proc.returncode}: {err_b.decode(errors='replace')[:400]}")
+        detail = (err_b.decode(errors="replace").strip() or out_b.decode(errors="replace").strip())[:400]
+        raise RuntimeError(f"claude CLI exited {proc.returncode}: {detail}")
     out = out_b.decode(errors="replace").strip()
     if not out:
         raise RuntimeError("claude CLI returned no output")
