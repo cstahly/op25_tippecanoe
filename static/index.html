@@ -595,7 +595,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v39';
+const APP_VERSION = 'v40';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -1983,15 +1983,17 @@ function goToIncidentOnMap(number) {
   const incident = findIncident(number);
   if (!incident || incident.lat == null || incident.lng == null) return;
 
-  // Clear all filters so the pin is guaranteed to be visible
+  // Default to All/4h; only widen the time window if the target incident is older.
+  const ageHrs = incident.last_seen
+    ? (Date.now() - new Date(incident.last_seen).getTime()) / 3600000 : Infinity;
   _mapFilterStatus = 'all';
-  _mapFilterHours  = null;
+  _mapFilterHours  = ageHrs <= 4 ? 4 : ageHrs <= 12 ? 12 : ageHrs <= 24 ? 24 : null;
   filter      = 'all';
   trunkFilter = 'all';
   document.querySelectorAll('.map-filter-btn[data-mf-status]').forEach(b =>
     b.classList.toggle('active', b.dataset.mfStatus === 'all'));
   document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
-    b.classList.toggle('active', b.dataset.mfHours === ''));
+    b.classList.toggle('active', b.dataset.mfHours === String(_mapFilterHours ?? '')));
   try { _syncActiveFilterDim(); } catch(_) {}
   document.querySelectorAll('[data-filter]').forEach(b =>
     b.classList.toggle('active', b.dataset.filter === 'all'));
