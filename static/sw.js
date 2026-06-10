@@ -1,4 +1,4 @@
-const CACHE = 'p25-v65';
+const CACHE = 'p25-v66';
 const SHELL = ['/', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', e =>
