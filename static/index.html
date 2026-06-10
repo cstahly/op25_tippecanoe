@@ -189,8 +189,11 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .incident-card[data-kind="routine"] { border-left-color: var(--other); }
 .incident-card[data-kind="watch"] { border-left-color: var(--police); }
 .incident-card[data-stale="true"] { opacity: .68; }
-.incident-card[data-priority="2"] { border-top: 2px solid rgba(245,158,11,.45); }
-.incident-card[data-priority="1"] { border-top: 2px solid rgba(239,68,68,.6); }
+.incident-card[data-priority="1"] { border-top: 2px solid rgba(239,68,68,.7); }
+.incident-card[data-priority="2"] { border-top: 2px solid rgba(245,158,11,.55); }
+.incident-card[data-priority="3"] { border-top: 2px solid rgba(234,179,8,.4); }
+.incident-card[data-priority="4"] { border-top: 2px solid rgba(59,130,246,.3); }
+.incident-card[data-priority="5"] { border-top: 2px solid rgba(107,114,128,.25); }
 .priority-badge { font-size: 10px; font-weight: 800; letter-spacing: .2px; border-radius: 3px; padding: 2px 5px; }
 .priority-badge.p2 { background: rgba(245,158,11,.18); color: #f59e0b; }
 .priority-badge.p1 { background: rgba(239,68,68,.18); color: #f87171; }
@@ -593,7 +596,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v31';
+const APP_VERSION = 'v32';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -802,7 +805,6 @@ function renderIncidents() {
     btn.onclick = () => {
       const v = btn.dataset.sf;
       statusFilters.has(v) ? statusFilters.delete(v) : statusFilters.add(v);
-      if (!statusFilters.size) statusFilters.add(v);
       renderIncidents();
     };
   });
@@ -810,7 +812,6 @@ function renderIncidents() {
     btn.onclick = () => {
       const v = parseInt(btn.dataset.pf);
       priorityFilters.has(v) ? priorityFilters.delete(v) : priorityFilters.add(v);
-      if (!priorityFilters.size) priorityFilters.add(v);
       renderIncidents();
     };
   });
