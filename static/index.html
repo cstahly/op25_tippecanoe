@@ -186,6 +186,15 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .incident-card[data-kind="routine"] { border-left-color: var(--other); }
 .incident-card[data-kind="watch"] { border-left-color: var(--police); }
 .incident-card[data-stale="true"] { opacity: .68; }
+.incident-card[data-priority="2"] { border-top: 2px solid rgba(245,158,11,.45); }
+.incident-card[data-priority="1"] { border-top: 2px solid rgba(239,68,68,.6); }
+.priority-badge { font-size: 10px; font-weight: 800; letter-spacing: .2px; border-radius: 3px; padding: 2px 5px; }
+.priority-badge.p2 { background: rgba(245,158,11,.18); color: #f59e0b; }
+.priority-badge.p1 { background: rgba(239,68,68,.18); color: #f87171; }
+.incident-status-tab[data-incident-filter="high"].active { border-color: #f59e0b; background: rgba(245,158,11,.12); color: #f59e0b; }
+.incident-sort-btn { background: none; border: 1px solid var(--border); border-radius: 14px; padding: 3px 8px;
+  font-size: 11px; font-weight: 600; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.incident-sort-btn.active { color: var(--summary); border-color: rgba(245,158,11,.55); }
 .incident-row-main { display: flex; align-items: flex-start; justify-content: space-between;
                      gap: 12px; min-width: 0; }
 .incident-card-title { font-size: 15px; font-weight: 800; line-height: 1.25; }
@@ -511,6 +520,10 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <div class="incident-modal-value" id="incident-modal-agency"></div>
       </div>
       <div class="incident-modal-row">
+        <div class="incident-modal-label">Priority</div>
+        <div class="incident-modal-value" id="incident-modal-priority"></div>
+      </div>
+      <div class="incident-modal-row">
         <div class="incident-modal-label">Details</div>
         <div class="incident-modal-details" id="incident-modal-details"></div>
       </div>
@@ -578,7 +591,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v28';
+const APP_VERSION = 'v30';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -681,6 +694,7 @@ let summaryCooldownTimer = null;
 let feedSearch = '';
 let incidentSearch = '';
 let incidentStatusFilter = 'open';
+let incidentSortBy = 'default'; // 'default' | 'priority'
 let selectedIncidentNumber = null;
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -753,11 +767,9 @@ function renderIncidents() {
     <div class="incident-status-tabs">
       ${incidentFilterButton('open', 'Open')}
       ${incidentFilterButton('active', 'Active')}
-      ${incidentFilterButton('watch', 'Watch')}
-      ${incidentFilterButton('stale', 'Stale')}
-      ${incidentFilterButton('routine', 'Routine')}
-      ${incidentFilterButton('clear', 'Clear')}
+      ${incidentFilterButton('high', '⬆ High')}
       ${incidentFilterButton('all', 'All')}
+      <button class="incident-sort-btn ${incidentSortBy === 'priority' ? 'active' : ''}" id="incident-sort-btn">↕ ${incidentSortBy === 'priority' ? 'Priority' : 'Status'}</button>
     </div>`;
   const board = document.createElement('div');
   board.className = 'incident-board';
@@ -785,6 +797,11 @@ function renderIncidents() {
       renderIncidents();
     };
   });
+  const sortBtn = document.getElementById('incident-sort-btn');
+  if (sortBtn) sortBtn.onclick = () => {
+    incidentSortBy = incidentSortBy === 'priority' ? 'default' : 'priority';
+    renderIncidents();
+  };
   if (restoreSearchFocus) {
     search.focus();
     search.setSelectionRange(searchStart, searchEnd);
@@ -797,37 +814,47 @@ function incidentFilterButton(value, label) {
 
 function filterIncidents() {
   const q = incidentSearch.trim().toLowerCase();
-  return incidents.filter(incident => {
+  let result = incidents.filter(incident => {
     const kind = incident.status_kind || 'watch';
+    const prio = incident.priority || 3;
     const statusMatch =
       incidentStatusFilter === 'all' ||
-      (incidentStatusFilter === 'open'    && kind !== 'clear' && !incident.is_stale) ||
-      (incidentStatusFilter === 'stale'   && incident.is_stale) ||
-      (incidentStatusFilter === 'active'  && kind === 'active'  && !incident.is_stale) ||
-      (incidentStatusFilter === 'watch'   && kind === 'watch'   && !incident.is_stale) ||
-      (incidentStatusFilter === 'routine' && kind === 'routine' && !incident.is_stale) ||
-      (incidentStatusFilter === 'clear'   && kind === 'clear');
+      (incidentStatusFilter === 'open'   && kind !== 'clear' && !incident.is_stale) ||
+      (incidentStatusFilter === 'active' && kind === 'active' && !incident.is_stale) ||
+      (incidentStatusFilter === 'high'   && prio <= 2);
     if (!statusMatch) return false;
     if (!q) return true;
     const haystack = [
-      incident.number,
-      incident.title,
-      incident.status,
-      incident.agency,
-      incident.location,
-      incident.action,
+      incident.number, incident.title, incident.status,
+      incident.agency, incident.location, incident.action,
       ...(incident.details || []),
     ].join(' ').toLowerCase();
     return haystack.includes(q);
   });
+  if (incidentSortBy === 'priority') {
+    result = [...result].sort((a, b) => {
+      const pa = a.priority || 3, pb = b.priority || 3;
+      if (pa !== pb) return pa - pb; // P1 first (lowest number = highest urgency)
+      return (b.last_seen || '').localeCompare(a.last_seen || '');
+    });
+  }
+  return result;
+}
+
+function priorityBadgeHtml(p) {
+  if (p <= 1) return `<span class="priority-badge p1" title="Critical urgency">P1</span>`;
+  if (p <= 2) return `<span class="priority-badge p2" title="Serious urgency">P2</span>`;
+  return '';
 }
 
 function makeIncidentCard(incident) {
   const card = document.createElement('div');
   const kind = incident.status_kind || 'watch';
+  const prio = incident.priority || 3;
   card.className = 'incident-card';
   card.dataset.kind = kind;
   card.dataset.stale = incident.is_stale ? 'true' : 'false';
+  card.dataset.priority = prio;
   card.dataset.number = incident.number;
   const statusClass = `status-${kind}`;
   const title = incident.number ? `#${incident.number} ${incident.title || 'Incident'}` : (incident.title || 'Incident');
@@ -841,6 +868,7 @@ function makeIncidentCard(incident) {
     <div class="incident-row-main">
       <div class="incident-card-title">${escHtml(title)}</div>
       <div class="incident-meta-row">
+        ${priorityBadgeHtml(prio)}
         <span class="incident-pill ${statusClass}">${escHtml(incident.status || 'WATCH')}</span>
         ${incident.is_stale ? '<span class="incident-pill status-stale">STALE</span>' : ''}
         <span class="incident-pill">${escHtml(incident.agency || 'Unknown')}</span>
@@ -940,10 +968,13 @@ function openIncidentModal(number) {
   if (!incident) return;
   const modal = document.getElementById('incident-modal');
   const title = incident.number ? `#${incident.number} ${incident.title || 'Incident'}` : (incident.title || 'Incident');
+  const _prio = incident.priority || 3;
+  const _prioLabels = ['', '1 — Critical', '2 — Serious', '3 — Moderate', '4 — Minor', '5 — Routine'];
   document.getElementById('incident-modal-kicker').textContent = incident.is_stale ? `${incident.status || 'WATCH'} · STALE` : (incident.status || 'WATCH');
   document.getElementById('incident-modal-title').textContent = title;
   document.getElementById('incident-modal-location').innerHTML = incident.location ? mapLocationHtml(incident.location, incident.number) : 'Unknown';
   document.getElementById('incident-modal-agency').textContent = incident.agency || 'Unknown';
+  document.getElementById('incident-modal-priority').textContent = _prioLabels[_prio] || '3 — Moderate';
   document.getElementById('incident-modal-action').innerHTML = renderInlineMarkdown(incident.action || 'None');
   const timesRow = document.getElementById('incident-modal-times-row');
   const timesEl = document.getElementById('incident-modal-times');

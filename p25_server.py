@@ -900,7 +900,7 @@ def incident_rows_from_db(conn: sqlite3.Connection) -> list[dict]:
         "LEFT JOIN geocode_cache g ON i.location = g.address "
         "ORDER BY "
         "CASE i.status_kind WHEN 'active' THEN 0 WHEN 'watch' THEN 1 WHEN 'routine' THEN 2 WHEN 'clear' THEN 3 ELSE 1 END, "
-        "i.priority DESC, "
+        "i.priority ASC, "
         "i.last_seen DESC"
     ).fetchall()
     return [_incident_row_to_api(row) for row in rows]
@@ -1369,7 +1369,7 @@ Use one markdown section per incident with this shape:
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
 - Location: pure mappable address/place only, or Unknown. Do not add context, explanations, parentheticals, routes, or "near..." guesses here.
 - Details: concise update
-- Priority: 1-5 urgency (1=routine traffic stop/minor call, 2=non-urgent response, 3=moderate/standard, 4=serious/major incident, 5=critical/life-threatening/mass casualty). Update if new traffic changes severity. Use the existing board value if no change.
+- Priority: 1-5 urgency (1=critical/life-threatening/mass casualty, 2=serious/major incident, 3=moderate/standard, 4=non-urgent response, 5=routine traffic stop/minor call). Default is 3. Update if new traffic changes severity. Use the existing board value if no change.
 - Action: what remains unresolved or what to watch for. REQUIRED: if a person's name (suspect, subject, driver, wanted person) was mentioned in the traffic, append a MyCase link using the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both the link text and query params.
 
 Incident numbers are persistent identifiers. Use only integers, never letters. \
@@ -1410,7 +1410,7 @@ Return concise markdown sections:
 - Status:
 - Location: pure mappable address/place only, or Unknown
 - Details:
-- Priority: 1-5 urgency (1=routine, 5=critical/life-threatening)
+- Priority: 1-5 urgency (1=critical/life-threatening, 5=routine)
 - Action:
 """
 
@@ -1441,7 +1441,7 @@ Use one markdown section per incident:
 - Status: ACTIVE, DISPATCHED, EN ROUTE, ROUTINE, CLEAR, or PENDING
 - Location: pure mappable address/place only, or Unknown
 - Details: concise full-arc update
-- Priority: 1-5 urgency (1=routine, 2=non-urgent, 3=moderate, 4=serious, 5=critical/life-threatening)
+- Priority: 1-5 urgency (1=critical/life-threatening, 2=serious, 3=moderate, 4=non-urgent, 5=routine)
 - Action: what remains unresolved or what to watch for. REQUIRED: if a person's name (suspect, subject, driver, wanted person) was mentioned, append a MyCase link using the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) — substitute the real name in both the link text and query params.
 
 Chunk summaries:
@@ -1486,7 +1486,7 @@ Rules:
   the log shows ongoing activity.
 - Location must be a pure mappable address/place only, or Unknown. Put uncertainty and context in details.
 - Keep each incident concise: at most two details.
-- priority is 1-5 urgency: 1=routine/minor, 2=non-urgent, 3=moderate (default), 4=serious/major, 5=critical/life-threatening. Use the existing board value (shown as P# in the board context) if unchanged. Update it if new traffic changes severity.
+- priority is 1-5 urgency: 1=critical/life-threatening, 2=serious/major, 3=moderate (default), 4=non-urgent, 5=routine/minor. Use the existing board value (shown as P# in the board context) if unchanged. Update it if new traffic changes severity.
 - IMPORTANT: When a person's name appears in the transmissions, you MUST include a MyCase link in the action field. Use the format [MyCase: Firstname Lastname](https://p25.sadbabyrabbit.com/api/mycase?first=Firstname&last=Lastname) with the real name in both the label and the query params.
 - If there are no incident updates, return {{"incidents":[]}}.
 """
