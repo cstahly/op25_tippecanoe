@@ -1,6 +1,6 @@
 # P25 / SDR System — Agent Handoff
 
-Last updated: 2026-06-09 (evening session). Read before changing anything.
+Last updated: 2026-06-10 (overnight session — conversational slicing). Read before changing anything.
 
 Hardware is a Kali bare-metal box. Full sudo is available. OP25 runs as a user terminal
 process; the web app runs under systemd.
@@ -11,8 +11,8 @@ process; the web app runs under systemd.
 
 | System | Status | Notes |
 |--------|--------|-------|
-| OP25 decoder | Operational | Running as `python3 multi_rx.py -v 1 -c /home/cstahly/op25_tippecanoe/tippecanoe.json` |
-| Whisper STT | Operational | `turbo`, CPU, int8. Do not use CUDA — kills RDP display. |
+| OP25 decoder | Operational | Launcher: `/usr/local/bin/op25`. User service available: `systemctl --user {start,stop,status} op25` runs it in tmux session "op25" — curses UI attachable from any ssh/tty via `tmux attach -t op25` (detach: Ctrl-b d). Linger is enabled so it starts at boot. Note: post-call `control channel timeout, freq(857.7375)` lines in stderr are benign ~1s CQPSK re-acquisition on the live CC, not a fault. |
+| Whisper STT | Operational | `turbo` (large-v3-turbo), CUDA int8 on the 1050 Ti — GPU per user's choice 2026-06-10; old "never CUDA" rule obsolete. large-v3 does NOT fit: weights load (1.6GB) but decode OOMs the 4GB card. GPU decodes serialized + automatic CPU fallback on CUDA OOM (stt_audio.py, commits e3f5dca/7b3052c). |
 | Web app | Operational | `p25-server.service`, HTTPS via nginx |
 | Incident state DB | Operational | `~/op25_tippecanoe/p25_state.db` |
 | Satellite scheduler | **Active** | system `sdr-scheduler.service`; rules in `~/sdr_scheduler_rules.json` |
@@ -40,7 +40,7 @@ Tippecanoe config:
 
 `stt_audio.py`:
 - Path: `~/src/op25/op25/gr-op25_repeater/apps/stt_audio.py`
-- Whisper: `turbo`, CPU, int8
+- Whisper: `turbo`, CUDA int8 (see §1 — old "never CUDA" rule obsolete)
 - Audio FIFO: `/tmp/p25_audio.fifo`
 
 ---
@@ -60,7 +60,50 @@ EnvironmentFile=/etc/p25-server.env
 ExecStart=/usr/bin/python3 -m uvicorn p25_server:app --host 127.0.0.1 --port 8765
 ```
 
-State DB: `~/op25_tippecanoe/p25_state.db` — safe to rebuild from log if wedged, but do not delete casually (manual status edits live in DB).
+State DB: `~/op25_tippecanoe/p25_state.db` — transmissions table rebuilds from log, but
+`incident_state`, `incident_tx`, and `geocode_cache` are authoritative — do not delete.
+Backed up daily at 14:00 via cron (`backup_db.sh` → `macbook-pro-3.local:~/backups/`, silent no-op if Mac is off).
+
+### Conversational slicing / tx attribution (2026-06-10, commit 1c04c4a)
+
+The summarizer attributes individual transmissions to incidents:
+
+- Prompt lines are numbered `#ID`; the model returns `tx_ids` per incident.
+  Attribution is deliberately **liberal** — garbled/ambiguous lines get best-guess
+  attribution by talkgroup/timing/adjacency. Expect occasional wrong guesses.
+- `incident_tx` table maps incident → tx (with time/talkgroup fallback columns).
+- `last_seen` = newest attributed tx timestamp (real radio activity), NOT the summary
+  clock. `first_seen` for new incidents = oldest attributed tx. Falls back to summary
+  clock if the model omits tx_ids.
+- `sync_transmissions_from_log` is **append-only** — tx ids are stable. Full rebuild
+  only if the log shrinks (logged to stderr; ids may shift, hence the fallback columns).
+- `GET /api/incidents/{number}/transcript` — attributed lines + wav clips per incident.
+  Backend exists; no client UI for it yet (natural next step: transcript + clip playlist
+  in incident detail on web/iOS).
+- Auto-summary: every **15 min** (`P25_AUTO_SUMMARY_INTERVAL`, was 2h), first run 2 min
+  after server start (was: slept a full interval first). This matters because stale
+  display threshold is 1h — with a 2h interval everything looked stale between runs.
+
+### Status/priority model (2026-06-09/10 sessions)
+
+- status_kind: `active` | `routine` | `clear` — "watch" eliminated entirely.
+- priority 1-5: P1 purple #a855f7, P2 red #ef4444, P3 yellow #eab308, P4 sky #0ea5e9, P5 slate #475569.
+- CLEAR forces priority ≥ 4 (server clamp + prompt rule).
+- Incident sort is always priority then status weight — no sort toggle.
+- `is_stale` (last_seen > 1h, `P25_STALE_DISPLAY_SECONDS`) is a **display hint only —
+  never use it to hide incidents from map/list filters** (caused empty-map bugs twice).
+  Auto-clear at 4h (`P25_STALE_INCIDENT_SECONDS`) is separate.
+
+### iOS app (~/src/p25-ios, Mac: macbook-pro-3.local)
+
+- Map tab: pins colored by priority; filter pill = Critical / Now / 8hr / All (default Now =
+  non-cleared). Incidents tab filter: Active / Critical / All.
+- CarPlay: pins colored by priority via `withTintColor(_, renderingMode: .alwaysOriginal)` —
+  `UIImage.SymbolConfiguration(paletteColors:)` does NOT tint monochrome symbols (black-dot bug).
+- After pushing iOS: `ssh macbook-pro-3.local "cd ~/src/p25-ios && git pull"`, then verify with
+  `xcodebuild -scheme P25Monitor -destination 'platform=iOS Simulator,OS=18.5,name=iPhone 16 Pro Max' build`
+  **before telling the user it's ready**. Code signing fails over SSH (errSecInternalComponent) — expected;
+  user hits Run in Xcode himself.
 
 ---
 
@@ -221,7 +264,6 @@ No existing radio is type-accepted for GMRS (HackRF cannot legally transmit on G
 ## 10. Misc
 
 - **Do not overwrite `/etc/p25-server.env`**
-- **Do not use CUDA for Whisper** — shares GPU with RDP encoder, kills display
 - **OP25 repo**: `~/src/op25/CMakeLists.txt` is modified — do not revert
 - KLAF manual AM monitoring:
   ```bash
