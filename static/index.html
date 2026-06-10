@@ -177,17 +177,6 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
        border-radius: 999px; padding: 4px 10px; font-size: 11px;
        font-weight: 800; text-transform: uppercase; cursor: pointer; }
 .fck.on { color: var(--text); border-color: var(--police); background: rgba(59,130,246,.12); }
-/* priority chip — muted tint when off, full color when on */
-.fck[data-pf="1"] { border-color: rgba(168,85,247,.4);  color: rgba(192,132,252,.65); }
-.fck[data-pf="2"] { border-color: rgba(239,68,68,.4);   color: rgba(248,113,113,.65); }
-.fck[data-pf="3"] { border-color: rgba(234,179,8,.4);   color: rgba(251,191,36,.65);  }
-.fck[data-pf="4"] { border-color: rgba(14,165,233,.4);  color: rgba(56,189,248,.65);  }
-.fck[data-pf="5"] { border-color: rgba(71,85,105,.45);  color: rgba(148,163,184,.55); }
-.fck[data-pf="1"].on { border-color: rgba(168,85,247,.7);  background: rgba(168,85,247,.15); color: #c084fc; }
-.fck[data-pf="2"].on { border-color: rgba(239,68,68,.7);   background: rgba(239,68,68,.15);  color: #f87171; }
-.fck[data-pf="3"].on { border-color: rgba(234,179,8,.65);  background: rgba(234,179,8,.15);  color: #fbbf24; }
-.fck[data-pf="4"].on { border-color: rgba(14,165,233,.65); background: rgba(14,165,233,.15); color: #38bdf8; }
-.fck[data-pf="5"].on { border-color: rgba(71,85,105,.7);   background: rgba(71,85,105,.2);   color: #94a3b8; }
 .incident-board { max-width: 980px; margin: 0 auto; display: grid; gap: 8px; }
 .incident-card { background: var(--surface); border: 1px solid var(--border);
                  border-left-width: 4px; border-radius: 8px; overflow: hidden;
@@ -606,7 +595,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v38';
+const APP_VERSION = 'v39';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -708,8 +697,7 @@ let pollingStarted = false;
 let summaryCooldownTimer = null;
 let feedSearch = '';
 let incidentSearch = '';
-let statusFilters   = new Set(['active']);
-let priorityFilters = new Set([1, 2, 3, 4, 5]);
+let incidentFilter = 'now';  // 'critical' | 'now' | '8hr' | 'all' — matches iOS map filter
 
 let selectedIncidentNumber = null;
 
@@ -777,18 +765,12 @@ function renderIncidents() {
   const searchEnd = priorSearch?.selectionEnd || searchStart;
   const visible = filterIncidents();
   const tools = document.createElement('div');
-  const _sf = v => `<button class="fck ${statusFilters.has(v) ? 'on' : ''}" data-sf="${v}">${v}</button>`;
-  const _pf = (v, lbl) => `<button class="fck ${priorityFilters.has(v) ? 'on' : ''}" data-pf="${v}">${lbl}</button>`;
+  const _if = (v, lbl) => `<button class="fck ${incidentFilter === v ? 'on' : ''}" data-if="${v}">${lbl}</button>`;
   tools.className = 'incident-tools';
   tools.innerHTML = `
     <input class="incident-search" id="incident-search" type="search" placeholder="Search incidents" value="${escAttr(incidentSearch)}">
     <div class="filter-row">
-      <span class="filter-row-lbl">Status</span>
-      ${_sf('active')}${_sf('stale')}${_sf('clear')}
-    </div>
-    <div class="filter-row">
-      <span class="filter-row-lbl">Priority</span>
-      ${_pf(1,'P1 — Critical')}${_pf(2,'P2 — Serious')}${_pf(3,'P3 — Moderate')}${_pf(4,'P4 — Minor')}${_pf(5,'P5 — Routine')}
+      ${_if('critical','Critical')}${_if('now','Now')}${_if('8hr','8hr')}${_if('all','All')}
     </div>`;
   const board = document.createElement('div');
   board.className = 'incident-board';
@@ -810,17 +792,9 @@ function renderIncidents() {
     renderIncidents();
     document.getElementById('incident-search')?.focus();
   };
-  pane.querySelectorAll('[data-sf]').forEach(btn => {
+  pane.querySelectorAll('[data-if]').forEach(btn => {
     btn.onclick = () => {
-      const v = btn.dataset.sf;
-      statusFilters.has(v) ? statusFilters.delete(v) : statusFilters.add(v);
-      renderIncidents();
-    };
-  });
-  pane.querySelectorAll('[data-pf]').forEach(btn => {
-    btn.onclick = () => {
-      const v = parseInt(btn.dataset.pf);
-      priorityFilters.has(v) ? priorityFilters.delete(v) : priorityFilters.add(v);
+      incidentFilter = btn.dataset.if;
       renderIncidents();
     };
   });
@@ -845,17 +819,30 @@ function _incidentTrunkKind(agency) {
   return /\bisp\b|indot/.test(a) ? 'safet' : 'tippecanoe';
 }
 
+function _within8hr(incident) {
+  const raw = incident.first_seen || '';
+  let d = null;
+  if (/^\d{4}-\d{2}-\d{2} /.test(raw)) d = new Date(raw.replace(' ', 'T'));
+  else if (/^\d{2}:\d{2}:\d{2}$/.test(raw)) {
+    d = new Date();
+    const [h, m, s] = raw.split(':').map(Number);
+    d.setHours(h, m, s, 0);
+    if (d > Date.now() + 5 * 60 * 1000) d.setDate(d.getDate() - 1);
+  }
+  return d && !isNaN(d) && (Date.now() - d.getTime()) <= 8 * 3600 * 1000;
+}
+
 function filterIncidents() {
   const q = incidentSearch.trim().toLowerCase();
   let result = incidents.filter(incident => {
     const kind = incident.status_kind || 'active';
     const prio = incident.priority || 3;
     const statusMatch =
-      (statusFilters.has('active')  && (kind === 'active' || kind === 'routine') && !incident.is_stale) ||
-      (statusFilters.has('stale')   && incident.is_stale) ||
-      (statusFilters.has('clear')   && kind === 'clear');
+      incidentFilter === 'critical' ? (kind !== 'clear' && prio <= 2) :
+      incidentFilter === 'now'      ? kind !== 'clear' :
+      incidentFilter === '8hr'      ? (kind !== 'clear' || _within8hr(incident)) :
+                                      true;  // 'all'
     if (!statusMatch) return false;
-    if (!priorityFilters.has(prio)) return false;
     if (filter !== 'all' && _incidentAgencyKind(incident.agency) !== filter) return false;
     if (trunkFilter !== 'all' && _incidentTrunkKind(incident.agency) !== trunkFilter) return false;
     if (!q) return true;
