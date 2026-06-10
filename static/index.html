@@ -251,7 +251,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   color: inherit; padding: 2px 9px; border-radius: 4px; cursor: pointer; font-size: 11px; }
 #slice-banner-clear:hover { background: rgba(245,158,11,.15); }
 
-.incident-modal { position: fixed; inset: 0; z-index: 45; display: none;
+.incident-modal { position: fixed; inset: 0; z-index: 1100; display: none;
                   align-items: center; justify-content: center; padding: 18px;
                   background: rgba(0,0,0,.62); backdrop-filter: blur(6px); }
 .incident-modal.open { display: flex; }
@@ -595,7 +595,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v41';
+const APP_VERSION = 'v42';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
