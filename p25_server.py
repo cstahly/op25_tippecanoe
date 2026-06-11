@@ -840,6 +840,15 @@ def init_state_db() -> None:
             conn.execute("ALTER TABLE incident_state ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
         except Exception:
             pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE incident_state ADD COLUMN alerted INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+        # Don't retroactively email for incidents already on the board at deploy time.
+        try:
+            conn.execute("UPDATE incident_state SET alerted = 1 WHERE alerted = 0 AND priority > 1")
+        except Exception:
+            pass
         # Backfill first_tx_id for incidents created before this column existed.
         # Find the earliest summary job whose output mentions each incident number.
         unfilled = conn.execute("SELECT number FROM incident_state WHERE first_tx_id = 0").fetchall()
@@ -1039,6 +1048,37 @@ def _tx_time_to_datetime_str(hms: str) -> str:
         dt -= timedelta(days=1)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
+ALERT_EMAIL = os.environ.get("P25_ALERT_EMAIL", "cstahly@gmail.com")
+PUBLIC_URL  = os.environ.get("P25_PUBLIC_URL", "https://p25.sadbabyrabbit.com")
+
+def _send_p1_alert(number: int, title: str, agency: str, location: str,
+                   status: str, details: list, action: str) -> None:
+    """Email a P1 incident via the localhost postfix relay. Never raises into the
+    caller — a mail failure must not break the summary write."""
+    import smtplib
+    from email.message import EmailMessage
+    try:
+        body = (
+            f"PRIORITY 1 incident #{number}\n\n"
+            f"{title}\n"
+            f"Agency:   {agency}\n"
+            f"Location: {location}\n"
+            f"Status:   {status}\n\n"
+            "Details:\n" + "\n".join(f"  - {d}" for d in details) + "\n\n"
+            f"Action: {action}\n\n"
+            f"Board: {PUBLIC_URL}\n"
+        )
+        msg = EmailMessage()
+        msg["From"] = f"P25 Scanner <{ALERT_EMAIL}>"
+        msg["To"] = ALERT_EMAIL
+        msg["Subject"] = f"[P25 P1] #{number}: {title}"
+        msg.set_content(body)
+        with smtplib.SMTP("127.0.0.1", 25, timeout=10) as s:
+            s.send_message(msg)
+        sys.stderr.write(f"[p1-alert] emailed #{number}: {title}\n")
+    except Exception as exc:
+        sys.stderr.write(f"[p1-alert] failed for #{number}: {exc}\n")
+
 def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id: int = 0, last_tx_id: int = 0) -> None:
     number = int(inc["number"])
     details = inc.get("details") or []
@@ -1051,7 +1091,8 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     status_kind = _status_kind(status, blob)
     if status_kind == "clear":
         priority = max(priority, 4)
-    row = conn.execute("SELECT first_seen, first_tx_id, last_tx_id FROM incident_state WHERE number = ?", (number,)).fetchone()
+    row = conn.execute("SELECT first_seen, first_tx_id, last_tx_id, alerted FROM incident_state WHERE number = ?", (number,)).fetchone()
+    already_alerted = bool(row["alerted"]) if row else False
     first_seen = row["first_seen"] if row else now
     stored_first_tx_id = int(row["first_tx_id"]) if row and row["first_tx_id"] else 0
     stored_last_tx_id  = int(row["last_tx_id"])  if row and row["last_tx_id"]  else 0
@@ -1118,6 +1159,18 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
             priority,
         ),
     )
+
+    # Fire a one-time email when an open incident reaches P1.
+    if priority == 1 and status_kind != "clear" and not already_alerted:
+        conn.execute("UPDATE incident_state SET alerted = 1 WHERE number = ?", (number,))
+        _send_p1_alert(
+            number, title,
+            str(inc.get("agency") or "Unknown").strip(),
+            str(inc.get("location") or "Unknown").strip(),
+            status,
+            [str(d).strip() for d in details if str(d).strip()][:8],
+            str(inc.get("action") or "").strip(),
+        )
 
 def seed_incident_state(conn: sqlite3.Connection) -> None:
     existing = conn.execute("SELECT COUNT(*) AS c FROM incident_state").fetchone()["c"]
