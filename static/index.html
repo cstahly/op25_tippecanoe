@@ -601,7 +601,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v51';
+const APP_VERSION = 'v52';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -2014,6 +2014,27 @@ function _mapFilterMatch(i) {
   return open;  // 'live' — stale is a display hint, never a visibility gate
 }
 
+function _spreadCoincident(list) {
+  // Incidents geocoding to the identical point (e.g. "Lafayette") get
+  // spread in a small ring (~80 m) so they stay individually clickable.
+  const groups = {};
+  for (const i of list) {
+    const key = `${i.lat.toFixed(5)},${i.lng.toFixed(5)}`;
+    (groups[key] = groups[key] || []).push(i);
+  }
+  const out = [];
+  for (const group of Object.values(groups)) {
+    if (group.length === 1) { out.push([group[0], group[0].lat, group[0].lng]); continue; }
+    const r = 0.0008;
+    group.forEach((i, k) => {
+      const a = (2 * Math.PI * k) / group.length;
+      out.push([i, i.lat + r * Math.sin(a),
+                i.lng + r * Math.cos(a) / Math.cos(i.lat * Math.PI / 180)]);
+    });
+  }
+  return out;
+}
+
 function renderMap() {
   if (!_map) return;
   const showable = incidents.filter(_mapFilterMatch);
@@ -2023,12 +2044,13 @@ function renderMap() {
     if (!showIds.has(id)) { marker.remove(); delete _mapMarkers[id]; }
   }
 
-  for (const incident of showable) {
+  for (const [incident, lat, lng] of _spreadCoincident(showable)) {
     const id = String(incident.number);
     if (_mapMarkers[id]) {
       _mapMarkers[id].setIcon(_pinIcon(incident));
+      _mapMarkers[id].setLatLng([lat, lng]);
     } else {
-      const marker = _markerFor(incident, incident.lat, incident.lng);
+      const marker = _markerFor(incident, lat, lng);
       marker.addTo(_map);
       _mapMarkers[id] = marker;
     }
