@@ -601,7 +601,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v50';
+const APP_VERSION = 'v51';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -1858,7 +1858,7 @@ function _pinIcon(incident) {
     iconAnchor: [size / 2, size / 2],
     html: `<div class="prio-pin" style="width:${size}px;height:${size}px;` +
           `background:${bg};border:${border};font-size:${font}px;` +
-          `${stale ? 'opacity:.85;' : ''}">${prio}</div>`,
+          `${stale ? 'opacity:.85;color:#9ca3af;' : ''}">${prio}</div>`,
   });
 }
 
