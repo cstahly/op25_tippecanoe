@@ -360,6 +360,11 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   align-items: center; justify-content: center; margin-top: 4px; }
 .leaflet-locate-btn:hover { background: var(--border); }
 .leaflet-locate-btn.tracking { color: #3b82f6; border-color: #3b82f6; }
+.prio-pin-wrap { background: none; border: none; }
+.prio-pin { border-radius: 50%; color: #fff; font-weight: 800; line-height: 1;
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 1px 5px rgba(0,0,0,.55); box-sizing: border-box;
+            text-shadow: 0 1px 2px rgba(0,0,0,.6); }
 .map-status-bar { position: absolute; bottom: 24px; right: 8px; z-index: 1000;
                   background: rgba(13,17,23,.88); border: 1px solid var(--border);
                   border-radius: 6px; color: var(--muted); font-size: 11px;
@@ -596,7 +601,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 </div>
 
 <script>
-const APP_VERSION = 'v49';
+const APP_VERSION = 'v50';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let AUTH  = sessionStorage.getItem('p25_auth')  || '';
@@ -1838,14 +1843,23 @@ const MAP_PRIORITY_COLORS = {
   1: '#a855f7', 2: '#ef4444', 3: '#eab308', 4: '#0ea5e9', 5: '#475569',
 };
 
-function _markerStyle(incident) {
-  // Pins colored by priority (matches iOS); stale = darkened + gray dashed ring
-  const color = MAP_PRIORITY_COLORS[incident.priority || 3] || MAP_PRIORITY_COLORS[3];
-  if (incident.is_stale) {
-    return { radius: 8, fillColor: _darkenHex(color, 0.68), color: '#9ca3af', weight: 2,
-             opacity: 0.85, fillOpacity: 0.7, dashArray: '4,3' };
-  }
-  return { radius: 10, fillColor: color, color: '#fff', weight: 2, opacity: 1, fillOpacity: 0.9 };
+function _pinIcon(incident) {
+  // Numbered pin, sized by priority — P1 dominates, P5 recedes.
+  const prio = incident.priority || 3;
+  const base = MAP_PRIORITY_COLORS[prio] || MAP_PRIORITY_COLORS[3];
+  const size = { 1: 30, 2: 26, 3: 22, 4: 18, 5: 16 }[prio] || 22;
+  const stale = !!incident.is_stale;
+  const bg = stale ? _darkenHex(base, 0.68) : base;
+  const border = stale ? '2px dashed #9ca3af' : '2px solid #fff';
+  const font = Math.max(10, Math.round(size * 0.48));
+  return L.divIcon({
+    className: 'prio-pin-wrap',
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    html: `<div class="prio-pin" style="width:${size}px;height:${size}px;` +
+          `background:${bg};border:${border};font-size:${font}px;` +
+          `${stale ? 'opacity:.85;' : ''}">${prio}</div>`,
+  });
 }
 
 function _loadLeaflet() {
@@ -1946,7 +1960,7 @@ function _startUserLocation(zoomNow) {
 
 function _markerFor(incident, lat, lng) {
   const title  = incident.number ? `#${incident.number} ${incident.title || ''}` : (incident.title || 'Incident');
-  const marker = L.circleMarker([lat, lng], _markerStyle(incident));
+  const marker = L.marker([lat, lng], { icon: _pinIcon(incident) });
   const prio = incident.priority || 3;
   const times = [incident.first_seen && `First: ${incident.first_seen}`,
                  incident.last_seen  && `Last: ${incident.last_seen}`].filter(Boolean).join(' · ');
@@ -2012,7 +2026,7 @@ function renderMap() {
   for (const incident of showable) {
     const id = String(incident.number);
     if (_mapMarkers[id]) {
-      _mapMarkers[id].setStyle(_markerStyle(incident));
+      _mapMarkers[id].setIcon(_pinIcon(incident));
     } else {
       const marker = _markerFor(incident, incident.lat, incident.lng);
       marker.addTo(_map);
