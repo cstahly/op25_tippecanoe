@@ -33,6 +33,7 @@ TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
 STALE_DISPLAY_SECONDS  = int(os.environ.get("P25_STALE_DISPLAY_SECONDS",  str(1 * 60 * 60)))
 STALE_INCIDENT_SECONDS = int(os.environ.get("P25_STALE_INCIDENT_SECONDS", str(4 * 60 * 60)))
 AUTO_SUMMARY_INTERVAL  = int(os.environ.get("P25_AUTO_SUMMARY_INTERVAL", str(15 * 60)))  # seconds
+SUMMARY_BATCH_LINES    = int(os.environ.get("P25_SUMMARY_BATCH_LINES", "600"))  # max tx lines per summary prompt
 
 app = FastAPI()
 
@@ -203,24 +204,31 @@ async def _auto_summary_worker():
     await asyncio.sleep(120)  # let the server settle, then summarize immediately
     while True:
         if os.path.exists(CLAUDE_CLI):
-            try:
-                await _run_auto_summary_once()
-            except Exception as exc:
-                sys.stderr.write(f"[auto-summary] error: {exc}\n")
+            # Drain in batches — after an outage the backlog can exceed one
+            # prompt (hit the 200K-token limit in a failure loop, 2026-06-12).
+            for _ in range(20):
+                try:
+                    processed = await _run_auto_summary_once()
+                except Exception as exc:
+                    sys.stderr.write(f"[auto-summary] error: {exc}\n")
+                    break
+                if processed < SUMMARY_BATCH_LINES:
+                    break
+                await asyncio.sleep(5)
         else:
             sys.stderr.write(f"[auto-summary] claude CLI not found at {CLAUDE_CLI}\n")
         await asyncio.sleep(AUTO_SUMMARY_INTERVAL)
 
-async def _run_auto_summary_once():
+async def _run_auto_summary_once() -> int:
     ensure_state_ready()
     with _db() as conn:
         from_tx_id = int(_get_state(conn, "last_summarized_tx_id", "0") or "0")
         tx_rows = conn.execute(
-            "SELECT * FROM transmissions WHERE id > ? ORDER BY id",
-            (from_tx_id,),
+            "SELECT * FROM transmissions WHERE id > ? ORDER BY id LIMIT ?",
+            (from_tx_id, SUMMARY_BATCH_LINES),
         ).fetchall()
         if not tx_rows:
-            return
+            return 0
         to_tx_id = tx_rows[-1]["id"]
         lines = [f"#{row['id']} {row['raw_line']}" for row in tx_rows]
         current_incidents = incident_rows_from_db(conn)
@@ -246,6 +254,7 @@ async def _run_auto_summary_once():
     with open(LOG_FILE, "a") as f:
         f.write(f"\n{SUMMARY_MARKER} {completed_at}\n{markdown}\n{'='*40}\n\n")
     sys.stderr.write(f"[auto-summary] {completed_at}: processed {len(tx_rows)} lines, {len(updates)} incident updates\n")
+    return len(tx_rows)
 
 @app.on_event("startup")
 async def _startup():
@@ -1932,8 +1941,8 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         with _db() as conn:
             from_tx_id = int(_get_state(conn, "last_summarized_tx_id", "0") or "0")
             tx_rows = conn.execute(
-                "SELECT * FROM transmissions WHERE id > ? ORDER BY id",
-                (from_tx_id,),
+                "SELECT * FROM transmissions WHERE id > ? ORDER BY id LIMIT ?",
+                (from_tx_id, SUMMARY_BATCH_LINES),
             ).fetchall()
             to_tx_id = tx_rows[-1]["id"] if tx_rows else from_tx_id
             lines = [f"#{row['id']} {row['raw_line']}" for row in tx_rows]
@@ -1956,8 +1965,8 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
         with _db() as conn:
             from_tx_id = int(_get_state(conn, "last_summarized_tx_id", "0") or "0")
             tx_rows = conn.execute(
-                "SELECT * FROM transmissions WHERE id > ? ORDER BY id",
-                (from_tx_id,),
+                "SELECT * FROM transmissions WHERE id > ? ORDER BY id LIMIT ?",
+                (from_tx_id, SUMMARY_BATCH_LINES),
             ).fetchall()
             to_tx_id = tx_rows[-1]["id"] if tx_rows else from_tx_id
             lines = [f"#{row['id']} {row['raw_line']}" for row in tx_rows]
@@ -2007,7 +2016,7 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 client = anthropic.AsyncAnthropic()
                 create_kwargs: dict = {
                     "model": model,
-                    "max_tokens": 4096,
+                    "max_tokens": 8192,
                     "messages": [{"role": "user", "content": prompt}],
                 }
                 if req.expensive:
