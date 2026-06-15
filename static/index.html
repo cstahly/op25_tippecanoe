@@ -845,7 +845,7 @@ function filterIncidents() {
     const prio = incident.priority || 3;
     const statusMatch =
       incidentFilter === 'critical' ? (kind !== 'clear' && prio <= 2) :
-      incidentFilter === 'now'      ? kind !== 'clear' :
+      incidentFilter === 'now'      ? (kind !== 'clear' && !incident.is_stale) :
       incidentFilter === '8hr'      ? (kind !== 'clear' || _within8hr(incident)) :
                                       true;  // 'all'
     if (!statusMatch) return false;

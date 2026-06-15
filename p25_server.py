@@ -30,7 +30,7 @@ DEFAULT_SUMMARY_LIMIT = 0
 DEFAULT_SHARE_TOKEN_SECONDS = 14 * 24 * 60 * 60
 RATE_LIMITS: dict[str, float] = {}
 TOKEN_SECRET = os.environ.get("P25_TOKEN_SECRET", "")
-STALE_DISPLAY_SECONDS  = int(os.environ.get("P25_STALE_DISPLAY_SECONDS",  str(1 * 60 * 60)))
+STALE_DISPLAY_SECONDS  = int(os.environ.get("P25_STALE_DISPLAY_SECONDS",  str(2 * 60 * 60)))
 STALE_INCIDENT_SECONDS = int(os.environ.get("P25_STALE_INCIDENT_SECONDS", str(4 * 60 * 60)))
 AUTO_SUMMARY_INTERVAL  = int(os.environ.get("P25_AUTO_SUMMARY_INTERVAL", str(15 * 60)))  # seconds
 SUMMARY_BATCH_LINES    = int(os.environ.get("P25_SUMMARY_BATCH_LINES", "600"))  # max tx lines per summary prompt
@@ -217,6 +217,17 @@ async def _auto_summary_worker():
                 await asyncio.sleep(5)
         else:
             sys.stderr.write(f"[auto-summary] claude CLI not found at {CLAUDE_CLI}\n")
+        # Self-clean the board: close incidents gone silent past the stale window,
+        # even when there's no new traffic to summarize (dead air is exactly when
+        # the board needs cleaning). Pure SQL, no LLM — runs every cycle regardless
+        # of the CLI. Same sweep the manual summarize path already performs.
+        try:
+            with _db() as conn:
+                cleared = _auto_clear_stale_incidents(conn)
+            if cleared:
+                sys.stderr.write(f"[auto-summary] auto-cleared {cleared} stale incident(s)\n")
+        except Exception as exc:
+            sys.stderr.write(f"[auto-summary] stale-clear error: {exc}\n")
         await asyncio.sleep(AUTO_SUMMARY_INTERVAL)
 
 async def _run_auto_summary_once() -> int:
@@ -1006,16 +1017,31 @@ def _incident_is_stale(row_or_inc) -> bool:
 def _auto_clear_stale_incidents(conn: sqlite3.Connection) -> int:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = conn.execute(
-        "SELECT number, last_seen, status_kind FROM incident_state WHERE status_kind != 'clear'"
+        "SELECT number, last_seen, status_kind, title, agency, location, "
+        "details_json, action, priority, alerted "
+        "FROM incident_state WHERE status_kind != 'clear'"
     ).fetchall()
     cleared = 0
     for row in rows:
-        if _incident_is_stale(row):
-            conn.execute(
-                "UPDATE incident_state SET status = 'CLEAR', status_kind = 'clear', updated_at = ?, priority = MAX(priority, 4) WHERE number = ?",
-                (now, row["number"]),
+        if not _incident_is_stale(row):
+            continue
+        new_priority = max(int(row["priority"]) if row["priority"] is not None else 3, 4)
+        conn.execute(
+            "UPDATE incident_state SET status = 'CLEAR', status_kind = 'clear', updated_at = ?, priority = MAX(priority, 4) WHERE number = ?",
+            (now, row["number"]),
+        )
+        cleared += 1
+        # If this was an alerted, still-open P1, fire the resolution email and
+        # advance the alert state machine to terminal — same as the explicit-clear
+        # path in _upsert_incident. Without this, a P1 that goes silent closes on
+        # the board but never tells you it resolved.
+        if int(row["alerted"] or 0) == 1:
+            conn.execute("UPDATE incident_state SET alerted = 2 WHERE number = ?", (row["number"],))
+            details = json.loads(row["details_json"] or "[]")
+            _send_p1_resolved(
+                row["number"], row["title"], row["agency"], row["location"],
+                "CLEAR", new_priority, details, row["action"],
             )
-            cleared += 1
     return cleared
 
 def _incident_row_to_api(row: sqlite3.Row) -> dict:
