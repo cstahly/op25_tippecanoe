@@ -854,8 +854,21 @@ def init_state_db() -> None:
         except Exception:
             pass  # column already exists
         # Don't retroactively email for incidents already on the board at deploy time.
+        # alerted state machine: 0 = never alerted, 1 = P1 email sent & still open at P1
+        # (eligible for a later resolution email), 2 = terminal (resolution sent, or a
+        # pre-feature incident we never want to alert on).
         try:
             conn.execute("UPDATE incident_state SET alerted = 1 WHERE alerted = 0 AND priority > 1")
+        except Exception:
+            pass
+        # Resolution-alert rollout: any alerted=1 row that is not currently an open P1
+        # was marked by the backfill above (never a genuine P1 email), so move it to the
+        # terminal state — otherwise its next upsert would fire a spurious "resolved" mail.
+        try:
+            conn.execute(
+                "UPDATE incident_state SET alerted = 2 "
+                "WHERE alerted = 1 AND NOT (priority = 1 AND status_kind != 'clear')"
+            )
         except Exception:
             pass
         # Backfill first_tx_id for incidents created before this column existed.
@@ -1088,6 +1101,34 @@ def _send_p1_alert(number: int, title: str, agency: str, location: str,
     except Exception as exc:
         sys.stderr.write(f"[p1-alert] failed for #{number}: {exc}\n")
 
+def _send_p1_resolved(number: int, title: str, agency: str, location: str,
+                      status: str, priority: int, details: list, action: str) -> None:
+    """Email the follow-up when a previously-alerted P1 drops below P1 or clears."""
+    import smtplib
+    from email.message import EmailMessage
+    try:
+        drop = "CLEARED" if str(status).upper().startswith("CLEAR") else f"downgraded to P{priority}"
+        body = (
+            f"P1 incident #{number} {drop}\n\n"
+            f"{title}\n"
+            f"Agency:   {agency}\n"
+            f"Location: {location}\n"
+            f"Status:   {status} (P{priority})\n\n"
+            "Latest:\n" + "\n".join(f"  - {d}" for d in details) + "\n\n"
+            f"Action: {action}\n\n"
+            f"Board: {PUBLIC_URL}\n"
+        )
+        msg = EmailMessage()
+        msg["From"] = f"P25 Scanner <{ALERT_EMAIL}>"
+        msg["To"] = ALERT_EMAIL
+        msg["Subject"] = f"[P25 resolved] #{number}: {title} — {drop}"
+        msg.set_content(body)
+        with smtplib.SMTP("127.0.0.1", 25, timeout=10) as s:
+            s.send_message(msg)
+        sys.stderr.write(f"[p1-alert] resolution emailed #{number} ({drop})\n")
+    except Exception as exc:
+        sys.stderr.write(f"[p1-alert] resolution failed for #{number}: {exc}\n")
+
 def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id: int = 0, last_tx_id: int = 0) -> None:
     number = int(inc["number"])
     details = inc.get("details") or []
@@ -1101,7 +1142,6 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     if status_kind == "clear":
         priority = max(priority, 4)
     row = conn.execute("SELECT first_seen, first_tx_id, last_tx_id, alerted FROM incident_state WHERE number = ?", (number,)).fetchone()
-    already_alerted = bool(row["alerted"]) if row else False
     first_seen = row["first_seen"] if row else now
     stored_first_tx_id = int(row["first_tx_id"]) if row and row["first_tx_id"] else 0
     stored_last_tx_id  = int(row["last_tx_id"])  if row and row["last_tx_id"]  else 0
@@ -1169,17 +1209,22 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
         ),
     )
 
-    # Fire a one-time email when an open incident reaches P1.
-    if priority == 1 and status_kind != "clear" and not already_alerted:
+    # P1 alert lifecycle (alerted: 0 = none, 1 = P1 sent & open, 2 = terminal).
+    #   open P1 while not already in the "P1-sent" state -> send P1 alert (state 1).
+    #     (alerted==2 here means a prior P1 resolved and re-escalated; re-alert.)
+    #   was in "P1-sent" state and no longer an open P1 -> send resolution (state 2).
+    alert_agency   = str(inc.get("agency") or "Unknown").strip()
+    alert_location = str(inc.get("location") or "Unknown").strip()
+    alert_details  = [str(d).strip() for d in details if str(d).strip()][:8]
+    alert_action   = str(inc.get("action") or "").strip()
+    open_p1 = priority == 1 and status_kind != "clear"
+    prior_alerted = int(row["alerted"]) if row else 0
+    if open_p1 and prior_alerted != 1:
         conn.execute("UPDATE incident_state SET alerted = 1 WHERE number = ?", (number,))
-        _send_p1_alert(
-            number, title,
-            str(inc.get("agency") or "Unknown").strip(),
-            str(inc.get("location") or "Unknown").strip(),
-            status,
-            [str(d).strip() for d in details if str(d).strip()][:8],
-            str(inc.get("action") or "").strip(),
-        )
+        _send_p1_alert(number, title, alert_agency, alert_location, status, alert_details, alert_action)
+    elif prior_alerted == 1 and not open_p1:
+        conn.execute("UPDATE incident_state SET alerted = 2 WHERE number = ?", (number,))
+        _send_p1_resolved(number, title, alert_agency, alert_location, status, priority, alert_details, alert_action)
 
 def seed_incident_state(conn: sqlite3.Connection) -> None:
     existing = conn.execute("SELECT COUNT(*) AS c FROM incident_state").fetchone()["c"]
