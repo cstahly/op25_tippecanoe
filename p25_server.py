@@ -2066,8 +2066,7 @@ def update_incident(number: int, req: IncidentUpdateReq, auth: dict = Depends(re
         _upsert_incident(conn, inc, now)
         return JSONResponse(_incident_by_number(conn, number), headers={"Cache-Control": "no-store"})
 
-@app.get("/api/incidents/{number}/transcript")
-def incident_transcript(number: int, auth: dict = Depends(require_auth)):
+def _incident_transcript_payload(number: int) -> dict:
     """Transmissions attributed to this incident by the summarizer (AI attribution)."""
     ensure_state_ready()
     with _db() as conn:
@@ -2079,10 +2078,16 @@ def incident_transcript(number: int, auth: dict = Depends(require_auth)):
             "WHERE it.incident_number = ? ORDER BY t.id",
             (number,),
         ).fetchall()
-        return JSONResponse(
-            {"number": number, "transmissions": [dict(r) for r in rows]},
-            headers={"Cache-Control": "no-store"},
-        )
+        return {"number": number, "transmissions": [dict(r) for r in rows]}
+
+@app.get("/api/incidents/{number}/transcript")
+def incident_transcript(number: int, auth: dict = Depends(require_auth)):
+    return JSONResponse(_incident_transcript_payload(number), headers={"Cache-Control": "no-store"})
+
+@app.get("/api/public/incidents/{number}/transcript")
+def incident_transcript_public(number: int):
+    """Unauth per-incident transcript for the public embed (same data as the feed)."""
+    return JSONResponse(_incident_transcript_payload(number), headers={"Cache-Control": "no-store"})
 
 @app.get("/api/users")
 def list_users(auth: dict = Depends(require_auth)):

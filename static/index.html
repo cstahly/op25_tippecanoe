@@ -278,6 +278,14 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .incident-status-control.active { border-color: var(--summary); color: var(--summary); }
 .incident-status-control.clear-action { border-color: rgba(34,197,94,.55); color: var(--ems); }
 .incident-modal-details { display: grid; gap: 7px; }
+.incident-modal-transcript { display: grid; gap: 6px; max-height: 320px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.itx-row { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.4; }
+.itx-meta { color: var(--muted); font-family: monospace; font-size: 10px; white-space: nowrap; padding-top: 2px; }
+.itx-text { color: var(--text); flex: 1; }
+.itx-play { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--summary);
+  cursor: pointer; font-size: 11px; padding: 1px 6px; flex-shrink: 0; }
+.itx-play:hover { border-color: var(--summary); }
 .incident-modal-error { display: none; color: #fecaca; border: 1px solid rgba(239,68,68,.45);
                         background: rgba(127,29,29,.25); border-radius: 8px; padding: 9px 10px;
                         font-size: 12px; }
@@ -562,6 +570,10 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
         <div class="incident-modal-value">
           <a id="incident-modal-log-link" href="#" class="incident-log-link">→ jump to log</a>
         </div>
+      </div>
+      <div class="incident-modal-row" id="incident-modal-transcript-row" style="display:none">
+        <div class="incident-modal-label">Radio Traffic</div>
+        <div class="incident-modal-transcript" id="incident-modal-transcript"></div>
       </div>
     </div>
   </div>
@@ -1052,7 +1064,43 @@ function openIncidentModal(number) {
     logRow.style.display = 'none';
   }
   renderIncidentStatusControls(incident);
+  loadIncidentTranscript(incident.number);
   modal.classList.add('open');
+}
+
+async function loadIncidentTranscript(number) {
+  const row = document.getElementById('incident-modal-transcript-row');
+  const box = document.getElementById('incident-modal-transcript');
+  row.style.display = '';
+  box.innerHTML = '<div class="incident-detail">Loading…</div>';
+  try {
+    const r = await fetch(`/api/incidents/${encodeURIComponent(number)}/transcript`,
+                          { headers: authHeader(), cache: 'no-store' });
+    if (!r.ok) throw new Error('http');
+    const data = await r.json();
+    if (selectedIncidentNumber !== Number(number)) return;  // modal switched while loading
+    const txs = data.transmissions || [];
+    if (!txs.length) { box.innerHTML = '<div class="incident-detail">No radio traffic linked.</div>'; return; }
+    box.innerHTML = '';
+    for (const tx of txs) {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'itx-row';
+      const tm = escHtml((tx.time || '').slice(-8));
+      const tg = escHtml(tx.talkgroup || 'Unknown');
+      const txt = escHtml(tx.text || '');
+      rowEl.innerHTML = `<span class="itx-meta">${tm}</span><span class="itx-text"><b>${tg}</b> ${txt}</span>`;
+      if (tx.wav_file) {
+        const b = document.createElement('button');
+        b.className = 'itx-play';
+        b.textContent = '▶';
+        b.addEventListener('click', e => { e.stopPropagation(); playClip(tx.wav_file, b); });
+        rowEl.appendChild(b);
+      }
+      box.appendChild(rowEl);
+    }
+  } catch (_) {
+    box.innerHTML = '<div class="incident-detail">Could not load radio traffic.</div>';
+  }
 }
 
 function renderIncidentStatusControls(incident) {

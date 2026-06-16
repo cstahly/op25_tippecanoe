@@ -134,6 +134,8 @@ a:hover { text-decoration: underline; }
 .alpr-dir { position: absolute; left: 50%; bottom: 50%; width: 0; height: 0;
   border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 9px solid #dc2626;
   transform-origin: 50% 100%; }
+.inc-chat { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px;
+  max-height: 260px; overflow-y: auto; display: grid; gap: 6px; }
 
 /* ── Footer ── */
 .footer { padding: 10px 14px; border-top: 1px solid var(--border);
@@ -414,7 +416,9 @@ function renderIncidents(incidents) {
     const prioBadge = `<span class="prio-badge p${prio}">P${prio}</span>`;
     const details = (inc.details || []).map(d => `<div class="inc-detail">${esc(d)}</div>`).join('');
     const action  = inc.action ? `<div class="inc-action">${renderLinks(inc.action)}</div>` : '';
-    const hasExtra = details || action;
+    const hasTraffic = (inc.first_tx_id || 0) > 0;
+    const chat = hasTraffic ? `<div class="inc-chat" id="chat-${inc.number}"></div>` : '';
+    const hasExtra = details || action || hasTraffic;
     const mapLink  = inc.lat != null
       ? ` <button class="toggle-btn" style="display:inline;padding:0 6px" onclick="flyTo(${inc.lat},${inc.lng},${inc.number})">🗺</button>` : '';
     return `
@@ -430,7 +434,7 @@ function renderIncidents(incidents) {
         ${inc.location && inc.location !== 'Unknown' ? `<span class="inc-badge">📍 ${esc(inc.location)}</span>` : ''}
         <span class="inc-badge">${esc(inc.status)}</span>
       </div>
-      ${hasExtra ? `<div class="inc-details" id="det-${inc.number}">${details}${action}</div>
+      ${hasExtra ? `<div class="inc-details" id="det-${inc.number}">${details}${action}${chat}</div>
       <button class="toggle-btn" onclick="toggleDetails(${inc.number})">▸ details</button>` : ''}
     </div>`;
   }).join('');
@@ -450,6 +454,31 @@ function toggleDetails(num) {
   if (!el) return;
   el.classList.toggle('open');
   if (btn) btn.textContent = el.classList.contains('open') ? '▾ details' : '▸ details';
+  if (el.classList.contains('open')) loadEmbedTranscript(num);
+}
+
+async function loadEmbedTranscript(num) {
+  const box = document.getElementById(`chat-${num}`);
+  if (!box || box.dataset.loaded) return;
+  box.dataset.loaded = '1';
+  box.innerHTML = '<div class="empty" style="padding:6px">Loading…</div>';
+  try {
+    const r = await fetch(`/api/public/incidents/${num}/transcript`);
+    const txs = (await r.json()).transmissions || [];
+    if (!txs.length) { box.innerHTML = '<div class="empty" style="padding:6px">No radio traffic</div>'; return; }
+    box.innerHTML = txs.map(tx => `
+      <div class="tx">
+        <div class="tx-meta">
+          <span class="tx-tg">${esc(tx.talkgroup || 'Unknown')}</span>
+          ${tx.wav_file ? `<button class="tx-play" data-wav="${esc(tx.wav_file)}" onclick="toggleClip(this)">▶</button>` : ''}
+          <span class="tx-time">${esc((tx.time || '').slice(-8))}</span>
+        </div>
+        ${tx.text ? `<div class="tx-text">${esc(tx.text)}</div>` : ''}
+      </div>`).join('');
+  } catch (_) {
+    box.dataset.loaded = '';
+    box.innerHTML = '<div class="empty" style="padding:6px">Could not load traffic</div>';
+  }
 }
 
 function renderFeed(txs) {
