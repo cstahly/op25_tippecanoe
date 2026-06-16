@@ -128,6 +128,12 @@ a:hover { text-decoration: underline; }
          cursor: pointer; transition: all .15s; }
 .fpill:hover { border-color: var(--text); color: var(--text); }
 .fpill.on { background: rgba(88,166,255,.15); border-color: var(--tc); color: var(--text); }
+.fpill[data-overlay="alpr"].on { background: rgba(220,38,38,.2); border-color: #dc2626; color: #fca5a5; }
+.alpr-cam { width: 12px; height: 12px; border-radius: 50%; background: #dc2626; border: 2px solid #fff;
+  box-shadow: 0 0 5px rgba(220,38,38,.9); position: relative; }
+.alpr-dir { position: absolute; left: 50%; bottom: 50%; width: 0; height: 0;
+  border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 9px solid #dc2626;
+  transform-origin: 50% 100%; }
 
 /* ── Footer ── */
 .footer { padding: 10px 14px; border-top: 1px solid var(--border);
@@ -152,6 +158,9 @@ a:hover { text-decoration: underline; }
   <div class="filter-sep"></div>
   <button class="fpill on" data-tf="4">4h</button>
   <button class="fpill"    data-tf="all">All time</button>
+  <div class="filter-sep"></div>
+  <button class="fpill" data-overlay="heat">Heatmap</button>
+  <button class="fpill" data-overlay="alpr">ALPR</button>
 </div>
 
 <div class="section-tabs">
@@ -173,6 +182,7 @@ a:hover { text-decoration: underline; }
 </div><!-- #scroll-pane -->
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <script>
 const API = '/api/public';
 let lastUpdated = null;
@@ -181,6 +191,8 @@ let _markers = {};
 let _allIncidents = [];
 let _statusFilter = 'all';   // 'all' | 'active'
 let _timeFilter   = '4';     // 'all' | '4'
+let _heatOn = false, _heatLayer = null;        // incident density (precise points only)
+let _alprOn = false, _alprLayer = null, _alprData = null;  // Flock/ALPR overlay (DeFlock/OSM)
 
 // ── Leaflet map init ──────────────────────────────────────────────────────────
 function initMap() {
@@ -243,6 +255,39 @@ function updateMap(incidents) {
       _markers[id] = m;
     }
   }
+  renderHeat();  // keep the density layer in sync with fresh data
+}
+
+// ── Map overlays: incident heatmap + ALPR cameras ──────────────────────────────
+function renderHeat() {
+  if (!_map) return;
+  if (!_heatOn) { if (_heatLayer) { _map.removeLayer(_heatLayer); _heatLayer = null; } return; }
+  if (!window.L || !L.heatLayer) return;
+  const pts = _allIncidents.filter(i => i.lat != null && i.precise !== 0).map(i => [i.lat, i.lng, 1]);
+  if (_heatLayer) _heatLayer.setLatLngs(pts);
+  else { _heatLayer = L.heatLayer(pts, { radius: 22, blur: 18, minOpacity: 0.25 }); _heatLayer.addTo(_map); }
+}
+
+function alprIcon(cam) {
+  const arrow = (cam.dir == null) ? ''
+    : `<span class="alpr-dir" style="transform:translateX(-50%) rotate(${cam.dir}deg)"></span>`;
+  return L.divIcon({ className: '', iconSize: [16, 16], iconAnchor: [8, 8],
+    html: `<div class="alpr-cam" title="${(cam.operator || 'ALPR')} camera">${arrow}</div>` });
+}
+
+async function renderAlpr() {
+  if (!_map) return;
+  if (!_alprOn) { if (_alprLayer) { _map.removeLayer(_alprLayer); _alprLayer = null; } return; }
+  if (!_alprData) {
+    try { const r = await fetch('/api/public/alpr'); _alprData = (await r.json()).cameras || []; }
+    catch (_) { _alprData = []; }
+  }
+  if (_alprLayer) _map.removeLayer(_alprLayer);
+  _alprLayer = L.layerGroup(_alprData.map(c => L.marker([c.lat, c.lng], { icon: alprIcon(c) })
+    .bindPopup(`<b>${c.operator || 'ALPR'} camera</b><br>` +
+               `${c.dir != null ? 'Faces ' + Math.round(c.dir) + '°<br>' : ''}` +
+               `<span style="color:#888">via DeFlock / OpenStreetMap</span>`)));
+  _alprLayer.addTo(_map);
 }
 
 function scrollToIncident(num) {
@@ -341,6 +386,13 @@ document.querySelectorAll('.fpill[data-tf]').forEach(btn => {
     _timeFilter = btn.dataset.tf;
     document.querySelectorAll('.fpill[data-tf]').forEach(b => b.classList.toggle('on', b === btn));
     rerender();
+  };
+});
+document.querySelectorAll('.fpill[data-overlay]').forEach(btn => {
+  btn.onclick = () => {
+    const k = btn.dataset.overlay;
+    if (k === 'heat') { _heatOn = !_heatOn; btn.classList.toggle('on', _heatOn); renderHeat(); }
+    if (k === 'alpr') { _alprOn = !_alprOn; btn.classList.toggle('on', _alprOn); renderAlpr(); }
   };
 });
 

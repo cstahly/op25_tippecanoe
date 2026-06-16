@@ -1459,16 +1459,23 @@ def public_clip(filename: str):
                         headers={"Cache-Control": "public, max-age=3600",
                                  "Access-Control-Allow-Origin": "*"})
 
+def _alpr_payload() -> dict:
+    if ALPR_CACHE_FILE.exists():
+        try:
+            return json.loads(ALPR_CACHE_FILE.read_text())
+        except Exception:
+            pass
+    return {"updated": 0, "cameras": []}
+
 @app.get("/api/alpr", dependencies=[Depends(require_auth)])
 def get_alpr():
     """DeFlock-sourced ALPR (Flock) camera locations for the map overlay."""
-    if ALPR_CACHE_FILE.exists():
-        try:
-            return JSONResponse(json.loads(ALPR_CACHE_FILE.read_text()),
-                                headers={"Cache-Control": "public, max-age=3600"})
-        except Exception:
-            pass
-    return JSONResponse({"updated": 0, "cameras": []})
+    return JSONResponse(_alpr_payload(), headers={"Cache-Control": "public, max-age=3600"})
+
+@app.get("/api/public/alpr")
+def get_alpr_public():
+    """Public (unauth) ALPR cameras for the embed view — data is public (DeFlock/OSM)."""
+    return JSONResponse(_alpr_payload(), headers={"Cache-Control": "public, max-age=3600"})
 
 @app.get("/api/state", dependencies=[Depends(require_auth)])
 def get_state(scope: str = "window"):
