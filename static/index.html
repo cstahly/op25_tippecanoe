@@ -502,6 +502,8 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
       <button class="map-filter-btn active" data-mf-hours="4">4h</button>
       <button class="map-filter-btn" data-mf-hours="12">12h</button>
       <button class="map-filter-btn" data-mf-hours="24">24h</button>
+      <div class="map-filter-sep"></div>
+      <button class="map-filter-btn" id="map-heat-toggle">Heatmap</button>
     </div>
     <div class="map-status-bar" id="map-status-bar"></div>
   </div>
@@ -699,7 +701,7 @@ let wantAllIncidents = false;  // true only while viewing board "All" or map all
 // The live poll fetches a light 24h window by default; switch to the full history
 // (and back) only when the user selects a view that needs it.
 function updateIncidentScope() {
-  const want = incidentFilter === 'all' || _mapFilterHours == null;
+  const want = incidentFilter === 'all' || _mapFilterHours == null || _heatMode;
   if (want !== wantAllIncidents) {
     wantAllIncidents = want;
     syncEntries();  // immediate refetch at the new scope
@@ -1642,6 +1644,20 @@ document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(btn => {
   };
 });
 
+document.getElementById('map-heat-toggle')?.addEventListener('click', () => {
+  _heatMode = !_heatMode;
+  document.getElementById('map-heat-toggle').classList.toggle('active', _heatMode);
+  if (_heatMode) {
+    // Heatmap is an all-time, all-data aggregate by default.
+    _mapFilterHours = null;
+    document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
+      b.classList.toggle('active', b.dataset.mfHours === ''));
+    try { _syncActiveFilterDim(); } catch (_) {}
+  }
+  updateIncidentScope();
+  renderMap();
+});
+
 // ── Live audio ────────────────────────────────────────────────────────────────
 let _audioEl = null;
 let _audioLoading = false;
@@ -1816,6 +1832,8 @@ document.getElementById('share-modal').addEventListener('click', e => {
 let _leafletLoaded = false;
 let _map           = null;
 let _mapMarkers    = {};   // incident number → Leaflet marker
+let _heatMode      = false; // heatmap vs pins
+let _heatLayer     = null;
 let _mapFilterStatus = 'all';      // 'live' | 'all'
 let _mapFilterHours  = 4;          // null = no time limit | 4 | 12 | 24
 
@@ -1884,7 +1902,14 @@ function _loadLeaflet() {
     const s = document.createElement('script');
     s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
     s.crossOrigin = '';
-    s.onload = resolve;
+    s.onload = () => {
+      // Load the heat plugin after Leaflet; optional, so resolve either way.
+      const h = document.createElement('script');
+      h.src = 'https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js';
+      h.onload = resolve;
+      h.onerror = resolve;
+      document.head.appendChild(h);
+    };
     s.onerror = reject;
     document.head.appendChild(s);
   });
@@ -2052,6 +2077,8 @@ function _spreadCoincident(list) {
 
 function renderMap() {
   if (!_map) return;
+  if (_heatMode) return _renderHeat();
+  if (_heatLayer) { _map.removeLayer(_heatLayer); _heatLayer = null; }
   const showable = incidents.filter(_mapFilterMatch);
   const showIds = new Set(showable.map(i => String(i.number)));
 
@@ -2073,9 +2100,31 @@ function renderMap() {
   _updateMapStatus(showable.length);
 }
 
+function _renderHeat() {
+  // Heatmap mode: clear pins, draw density from precise points only (drops the
+  // city-centroid garbage that would otherwise be one giant fake hotspot).
+  for (const [id, marker] of Object.entries(_mapMarkers)) { marker.remove(); delete _mapMarkers[id]; }
+  const pts = incidents
+    .filter(_mapFilterMatch)
+    .filter(i => i.precise !== 0)
+    .map(i => [i.lat, i.lng, 1]);
+  if (!window.L || !L.heatLayer) { _updateMapStatus(0); return; }
+  if (_heatLayer) {
+    _heatLayer.setLatLngs(pts);
+  } else {
+    _heatLayer = L.heatLayer(pts, { radius: 22, blur: 18, maxZoom: 16, minOpacity: 0.25 });
+    _heatLayer.addTo(_map);
+  }
+  _updateMapStatus(pts.length);
+}
+
 function goToIncidentOnMap(number) {
   const incident = findIncident(number);
   if (!incident || incident.lat == null || incident.lng == null) return;
+  if (_heatMode) {  // jumping to a specific incident -> show pins, not the heat layer
+    _heatMode = false;
+    document.getElementById('map-heat-toggle')?.classList.remove('active');
+  }
 
   // Default to All/4h; only widen the time window if the target incident is older.
   const ageHrs = incident.last_seen
