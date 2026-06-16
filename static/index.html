@@ -214,6 +214,9 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .incident-subline { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px;
                     color: var(--muted); font-size: 12px; min-width: 0; }
 .incident-location { color: var(--text); font-size: 12px; line-height: 1.35; }
+.loc-approx { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
+  color: #eab308; border: 1px solid rgba(234,179,8,.45); border-radius: 3px; padding: 0 3px;
+  vertical-align: middle; }
 .incident-location a,
 .summary-md a.map-link { color: #93c5fd; text-decoration: none; }
 .incident-location a:hover,
@@ -915,7 +918,7 @@ function makeIncidentCard(incident) {
       </div>
     </div>
     <div class="incident-subline">
-      ${incident.location ? `<div class="incident-location">${mapLocationHtml(incident.location, incident.number)}</div>` : ''}
+      ${incident.location ? `<div class="incident-location">${mapLocationHtml(incident.location, incident.number)}${incident.precise === 0 && incident.lat != null ? ' <span class="loc-approx">approx</span>' : ''}</div>` : ''}
       <span class="incident-agency">${escHtml(incident.agency || 'Unknown agency')}</span>
       <span class="incident-age">updated ${updated}</span>
       <span class="incident-age">${escHtml(updates)}</span>
@@ -1861,22 +1864,16 @@ function _pinIcon(incident) {
   const base = MAP_PRIORITY_COLORS[prio] || MAP_PRIORITY_COLORS[3];
   const size = { 1: 30, 2: 26, 3: 22, 4: 18, 5: 16 }[prio] || 22;
   const stale = !!incident.is_stale;
-  // precise===0 -> approximate geocode (Google partial_match / centroid). Shown
-  // hollow + dotted so a roughly-placed call is visibly distinct from a confirmed one.
-  const approx = incident.precise === 0;
-  const bg = approx ? 'transparent' : (stale ? _darkenHex(base, 0.68) : base);
-  const border = approx ? `2px dotted ${base}`
-                        : (stale ? '2px dashed #9ca3af' : '2px solid #fff');
+  const bg = stale ? _darkenHex(base, 0.68) : base;
+  const border = stale ? '2px dashed #9ca3af' : '2px solid #fff';
   const font = Math.max(10, Math.round(size * 0.48));
-  const color = approx ? base : (stale ? '#9ca3af' : '#fff');
   return L.divIcon({
     className: 'prio-pin-wrap',
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
-    html: `<div class="prio-pin" title="${approx ? 'Approximate location' : ''}" ` +
-          `style="width:${size}px;height:${size}px;` +
-          `background:${bg};border:${border};font-size:${font}px;color:${color};` +
-          `${stale && !approx ? 'opacity:.85;' : ''}${approx ? 'opacity:.9;' : ''}">${prio}</div>`,
+    html: `<div class="prio-pin" style="width:${size}px;height:${size}px;` +
+          `background:${bg};border:${border};font-size:${font}px;` +
+          `${stale ? 'opacity:.85;color:#9ca3af;' : ''}">${prio}</div>`,
   });
 }
 
@@ -1987,7 +1984,7 @@ function _markerFor(incident, lat, lng) {
   const popupHtml = `
     <div class="map-popup-title">${priorityBadgeHtml(prio)} ${escHtml(title)}</div>
     <div class="map-popup-sub">${escHtml(incident.status || 'ACTIVE')} · ${escHtml(incident.agency || '')}</div>
-    <div class="map-popup-sub">${escHtml(incident.location || '')}</div>
+    <div class="map-popup-sub">${escHtml(incident.location || '')}${incident.precise === 0 ? ' <span class="loc-approx">approx</span>' : ''}</div>
     ${details}
     ${times ? `<div class="map-popup-sub" style="margin-bottom:8px">${escHtml(times)}</div>` : '<div style="margin-bottom:8px"></div>'}
     <button class="map-popup-btn" onclick="openIncidentModal(${Number(incident.number)})">Full details</button>`;
