@@ -382,6 +382,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
 .map-filter-btn.active { background: rgba(59,130,246,.18); border-color: var(--police);
                           color: var(--text); }
 .map-filter-btn.dimmed { opacity: .35; pointer-events: none; }
+.map-filter-btn.alpr-on { background: rgba(220,38,38,.2); border-color: #dc2626; color: #fca5a5; }
+.alpr-cam { width: 12px; height: 12px; border-radius: 50%; background: #dc2626; border: 2px solid #fff;
+  box-shadow: 0 0 5px rgba(220,38,38,.9); position: relative; }
+.alpr-dir { position: absolute; left: 50%; bottom: 50%; width: 0; height: 0;
+  border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 9px solid #dc2626;
+  transform-origin: 50% 100%; }
 .map-filter-sep { width: 1px; height: 16px; background: var(--border); flex-shrink: 0; }
 .leaflet-popup-content-wrapper { background: var(--surface); border: 1px solid var(--border);
                                   color: var(--text); border-radius: var(--radius); }
@@ -504,6 +510,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
       <button class="map-filter-btn" data-mf-hours="24">24h</button>
       <div class="map-filter-sep"></div>
       <button class="map-filter-btn" id="map-heat-toggle">Heatmap</button>
+      <button class="map-filter-btn" id="map-alpr-toggle" title="Flock/ALPR cameras (via DeFlock/OSM)">ALPR</button>
     </div>
     <div class="map-status-bar" id="map-status-bar"></div>
   </div>
@@ -1658,6 +1665,41 @@ document.getElementById('map-heat-toggle')?.addEventListener('click', () => {
   renderMap();
 });
 
+// ── ALPR (Flock) camera overlay ───────────────────────────────────────────────
+function _alprIcon(cam) {
+  const arrow = (cam.dir == null) ? ''
+    : `<span class="alpr-dir" style="transform:translateX(-50%) rotate(${cam.dir}deg)"></span>`;
+  const t = `${cam.operator || 'ALPR'} camera${cam.dir != null ? ' · faces ' + Math.round(cam.dir) + '°' : ''}`;
+  return L.divIcon({ className: 'alpr-wrap', iconSize: [16, 16], iconAnchor: [8, 8],
+    html: `<div class="alpr-cam" title="${t}">${arrow}</div>` });
+}
+
+async function _ensureAlpr() {
+  if (_alprData) return _alprData;
+  try {
+    const r = await fetch('/api/alpr', { headers: authHeader(), cache: 'no-store' });
+    _alprData = (await r.json()).cameras || [];
+  } catch (_) { _alprData = []; }
+  return _alprData;
+}
+
+document.getElementById('map-alpr-toggle')?.addEventListener('click', async () => {
+  _alprMode = !_alprMode;
+  document.getElementById('map-alpr-toggle').classList.toggle('alpr-on', _alprMode);
+  if (!_alprMode) {
+    if (_alprLayer) { _map.removeLayer(_alprLayer); _alprLayer = null; }
+    return;
+  }
+  await initMap();  // ensure Leaflet + map exist
+  const cams = await _ensureAlpr();
+  if (_alprLayer) _map.removeLayer(_alprLayer);
+  _alprLayer = L.layerGroup(cams.map(c => L.marker([c.lat, c.lng], { icon: _alprIcon(c) })
+    .bindPopup(`<b>${c.operator || 'ALPR'} camera</b><br>` +
+               `${c.dir != null ? 'Faces ' + Math.round(c.dir) + '°<br>' : ''}` +
+               `<span style="color:#888">via DeFlock / OpenStreetMap</span>`)));
+  _alprLayer.addTo(_map);
+});
+
 // ── Live audio ────────────────────────────────────────────────────────────────
 let _audioEl = null;
 let _audioLoading = false;
@@ -1834,6 +1876,9 @@ let _map           = null;
 let _mapMarkers    = {};   // incident number → Leaflet marker
 let _heatMode      = false; // heatmap vs pins
 let _heatLayer     = null;
+let _alprMode      = false; // Flock/ALPR camera overlay (independent of pins/heat)
+let _alprLayer     = null;
+let _alprData      = null;
 let _mapFilterStatus = 'all';      // 'live' | 'all'
 let _mapFilterHours  = 4;          // null = no time limit | 4 | 12 | 24
 

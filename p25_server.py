@@ -21,6 +21,14 @@ STATIC           = Path(__file__).parent / "static"
 AUDIO_FIFO       = "/tmp/p25_audio.fifo"
 DB_FILE          = Path.home() / "op25_tippecanoe/p25_state.db"
 AUDIO_CLIPS_DIR  = Path.home() / "op25_tippecanoe/audio_clips"
+ALPR_CACHE_FILE  = Path.home() / "op25_tippecanoe/alpr_cache.json"
+ALPR_BBOX        = (40.15, -87.15, 40.62, -86.60)  # minlat,minlon,maxlat,maxlon — Tippecanoe + nearby
+ALPR_REFRESH_S   = 7 * 24 * 3600  # DeFlock-mapped cameras don't move; refresh weekly
+_OVERPASS_EPS    = (
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
 
 MYCASE_PROXY_BASE = os.environ.get("MYCASE_PROXY_BASE", "https://p25.sadbabyrabbit.com")
 USERNAME = os.environ.get("P25_USER", "p25")
@@ -179,6 +187,50 @@ async def _geocode_one(address: str) -> tuple[float, float] | None:
     _geocode_failed.add(norm)
     return None
 
+def _fetch_alpr_sync() -> list[dict]:
+    """Query Overpass for DeFlock-mapped ALPR cameras in the local bbox."""
+    minlat, minlon, maxlat, maxlon = ALPR_BBOX
+    q = (f'[out:json][timeout:60];'
+         f'(node["man_made"="surveillance"]["surveillance:type"="ALPR"]'
+         f'({minlat},{minlon},{maxlat},{maxlon}););out body;')
+    body = urllib.parse.urlencode({"data": q}).encode()
+    for ep in _OVERPASS_EPS:
+        try:
+            req = urllib.request.Request(ep, data=body,
+                headers={"User-Agent": "p25-tippecanoe/1.0 (cstahly@gmail.com)"})
+            with urllib.request.urlopen(req, timeout=70) as r:
+                data = json.loads(r.read())
+            cams = []
+            for e in data.get("elements", []):
+                t = e.get("tags", {})
+                try: d = float(t.get("direction"))
+                except (TypeError, ValueError): d = None
+                if e.get("lat") is not None:
+                    cams.append({"lat": e["lat"], "lng": e["lon"], "dir": d,
+                                 "operator": t.get("manufacturer") or t.get("operator") or "ALPR",
+                                 "zone": t.get("surveillance:zone", "")})
+            return cams
+        except Exception as exc:
+            sys.stderr.write(f"[alpr] {ep} failed: {exc}\n")
+    return []
+
+async def _alpr_worker():
+    """Refresh the ALPR camera cache from Overpass on startup, then weekly. Writes
+    a file cache so /api/alpr never blocks on the (flaky) Overpass API."""
+    await asyncio.sleep(8)
+    while True:
+        try:
+            age = time.time() - ALPR_CACHE_FILE.stat().st_mtime if ALPR_CACHE_FILE.exists() else 1e12
+            if age >= ALPR_REFRESH_S:
+                cams = await asyncio.get_event_loop().run_in_executor(None, _fetch_alpr_sync)
+                if cams:
+                    ALPR_CACHE_FILE.write_text(json.dumps({"updated": int(time.time()), "cameras": cams}))
+                    sys.stderr.write(f"[alpr] cached {len(cams)} cameras\n")
+        except Exception as exc:
+            sys.stderr.write(f"[alpr worker] {exc}\n")
+        # retry soon if we still have no cache, else back off to the weekly refresh
+        await asyncio.sleep(ALPR_REFRESH_S if ALPR_CACHE_FILE.exists() else 1800)
+
 async def _geocode_worker():
     """Background task: geocode all uncached incident locations."""
     await asyncio.sleep(3)
@@ -295,6 +347,7 @@ async def _startup():
     asyncio.create_task(_audio_broadcast_loop())
     asyncio.create_task(_geocode_worker())
     asyncio.create_task(_auto_summary_worker())
+    asyncio.create_task(_alpr_worker())
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
@@ -1405,6 +1458,17 @@ def public_clip(filename: str):
     return FileResponse(path, media_type="audio/wav",
                         headers={"Cache-Control": "public, max-age=3600",
                                  "Access-Control-Allow-Origin": "*"})
+
+@app.get("/api/alpr", dependencies=[Depends(require_auth)])
+def get_alpr():
+    """DeFlock-sourced ALPR (Flock) camera locations for the map overlay."""
+    if ALPR_CACHE_FILE.exists():
+        try:
+            return JSONResponse(json.loads(ALPR_CACHE_FILE.read_text()),
+                                headers={"Cache-Control": "public, max-age=3600"})
+        except Exception:
+            pass
+    return JSONResponse({"updated": 0, "cameras": []})
 
 @app.get("/api/state", dependencies=[Depends(require_auth)])
 def get_state(scope: str = "window"):
