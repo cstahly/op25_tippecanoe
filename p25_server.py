@@ -97,14 +97,14 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 def _within_range(lat: float, lng: float) -> bool:
     return _haversine_km(lat, lng, *_GEOCODE_CENTER) <= _GEOCODE_MAX_KM
 
-def _cache_geocode(norm: str, lat: float, lng: float):
+def _cache_geocode(norm: str, lat: float, lng: float, precise: bool = True):
     with _db() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, cached_at) VALUES(?, ?, ?, ?)",
-            (norm, lat, lng, datetime.now().isoformat()),
+            "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, cached_at, precise) VALUES(?, ?, ?, ?, ?)",
+            (norm, lat, lng, datetime.now().isoformat(), 1 if precise else 0),
         )
 
-async def _geocode_photon(query: str) -> tuple[float, float] | None:
+async def _geocode_photon(query: str) -> tuple[float, float, bool] | None:
     params = urllib.parse.urlencode({"q": query, "limit": "3", "bbox": _PHOTON_BBOX, **_PHOTON_BIAS})
     req = urllib.request.Request(f"{_PHOTON_URL}?{params}", headers={"User-Agent": "P25Monitor/1.0"})
     def _fetch():
@@ -115,10 +115,17 @@ async def _geocode_photon(query: str) -> tuple[float, float] | None:
         coords = feature["geometry"]["coordinates"]
         lat, lng = float(coords[1]), float(coords[0])
         if _within_range(lat, lng):
-            return lat, lng
+            # Photon (fallback) gives no match-quality signal; treat as precise.
+            return lat, lng, True
     return None
 
-async def _geocode_google(query: str) -> tuple[float, float] | None:
+# Result types/location_types that mean Google only resolved to a city/county/zip
+# blob (no real street-level point). Only these get flagged approximate.
+_GOOGLE_COARSE_TYPES = {"locality", "sublocality", "neighborhood", "political",
+                        "administrative_area_level_1", "administrative_area_level_2",
+                        "administrative_area_level_3", "postal_code", "country"}
+
+async def _geocode_google(query: str) -> tuple[float, float, bool] | None:
     if not GOOGLE_MAPS_KEY:
         return None
     params = urllib.parse.urlencode({"address": query, "bounds": _GOOGLE_BOUNDS, "key": GOOGLE_MAPS_KEY})
@@ -130,12 +137,20 @@ async def _geocode_google(query: str) -> tuple[float, float] | None:
     for result in data.get("results", []):
         loc = result["geometry"]["location"]
         lat, lng = float(loc["lat"]), float(loc["lng"])
-        if _within_range(lat, lng):
-            return lat, lng
+        if not _within_range(lat, lng):
+            continue
+        # Keep the pin either way. Only flag approximate when Google had no real
+        # street-level point — location_type APPROXIMATE or a city/county/zip-only
+        # match. Street/route/intersection results (even partial_match) count as
+        # precise: partial_match alone over-flagged. The map dots approximate pins.
+        loctype = result.get("geometry", {}).get("location_type")
+        coarse = bool(set(result.get("types", [])) & _GOOGLE_COARSE_TYPES)
+        precise = loctype != "APPROXIMATE" and not coarse
+        return lat, lng, precise
     return None
 
 async def _geocode_one(address: str) -> tuple[float, float] | None:
-    """Geocode via Photon, falling back to Google if Photon finds nothing."""
+    """Geocode via Google (accurate on US rural addresses), falling back to Photon."""
     norm = address.strip()
     if not norm or norm.lower() in _GEOCODE_SKIP or norm in _geocode_failed:
         return None
@@ -144,18 +159,25 @@ async def _geocode_one(address: str) -> tuple[float, float] | None:
         if row:
             return row["lat"], row["lng"]
     query = _enrich_address(norm)
-    try:
-        result = await _geocode_photon(query)
-        if result is None:
-            result = await _geocode_google(query)
+    # Google first (handles intersections + Indiana grid roads, quality-gated above);
+    # Photon as fallback. Each backend in its own try so one failing doesn't block
+    # the other. If Google's key/billing lapses it returns None and we degrade to
+    # Photon-only automatically.
+    result = None
+    for backend in (_geocode_google, _geocode_photon):
+        try:
+            result = await backend(query)
+        except Exception as exc:
+            sys.stderr.write(f"[geocode] {backend.__name__} {norm!r}: {exc}\n")
+            continue
         if result:
-            _cache_geocode(norm, *result)
-            return result
-        _geocode_failed.add(norm)
-        return None
-    except Exception as exc:
-        sys.stderr.write(f"[geocode] {norm!r}: {exc}\n")
-        return None
+            break
+    if result:
+        lat, lng, precise = result
+        _cache_geocode(norm, lat, lng, precise)
+        return lat, lng
+    _geocode_failed.add(norm)
+    return None
 
 async def _geocode_worker():
     """Background task: geocode all uncached incident locations."""
@@ -834,7 +856,8 @@ def init_state_db() -> None:
             address TEXT PRIMARY KEY,
             lat     REAL NOT NULL,
             lng     REAL NOT NULL,
-            cached_at TEXT NOT NULL
+            cached_at TEXT NOT NULL,
+            precise INTEGER NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS incident_tx (
             incident_number INTEGER NOT NULL,
@@ -862,6 +885,12 @@ def init_state_db() -> None:
             pass  # column already exists
         try:
             conn.execute("ALTER TABLE incident_state ADD COLUMN alerted INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+        try:
+            # 1 = precise geocode, 0 = approximate (Google partial_match / centroid).
+            # Existing rows default precise=1 (Photon had no quality signal anyway).
+            conn.execute("ALTER TABLE geocode_cache ADD COLUMN precise INTEGER NOT NULL DEFAULT 1")
         except Exception:
             pass  # column already exists
         # Don't retroactively email for incidents already on the board at deploy time.
@@ -975,10 +1004,18 @@ def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
     )
     return len(rows)
 
-def incident_rows_from_db(conn: sqlite3.Connection) -> list[dict]:
+def incident_rows_from_db(conn: sqlite3.Connection, scope: str = "all") -> list[dict]:
+    # scope="window": light default for the live poll — every open incident (any
+    # age) plus anything cleared in the last 24h. Covers all default board/map
+    # views; the full history is only fetched when the user picks "All".
+    where = ""
+    if scope == "window":
+        where = ("WHERE i.status_kind != 'clear' "
+                 "OR i.last_seen >= datetime('now', 'localtime', '-24 hours') ")
     rows = conn.execute(
-        "SELECT i.*, g.lat AS lat, g.lng AS lng FROM incident_state i "
+        "SELECT i.*, g.lat AS lat, g.lng AS lng, g.precise AS precise FROM incident_state i "
         "LEFT JOIN geocode_cache g ON i.location = g.address "
+        + where +
         "ORDER BY "
         "CASE i.status_kind WHEN 'active' THEN 0 WHEN 'routine' THEN 1 WHEN 'clear' THEN 2 ELSE 0 END, "
         "i.priority ASC, "
@@ -1053,6 +1090,10 @@ def _incident_row_to_api(row: sqlite3.Row) -> dict:
         lng = row["lng"]
     except (IndexError, KeyError):
         lat = lng = None
+    try:
+        precise = row["precise"]
+    except (IndexError, KeyError):
+        precise = None
     return {
         "id": f"incident-{row['number']}",
         "number": row["number"],
@@ -1073,12 +1114,13 @@ def _incident_row_to_api(row: sqlite3.Row) -> dict:
         "is_stale": is_stale,
         "lat": lat,
         "lng": lng,
+        "precise": 1 if precise is None else int(precise),
         "priority": int(row["priority"]) if row["priority"] is not None else 3,
     }
 
 def _incident_by_number(conn: sqlite3.Connection, number: int) -> dict | None:
     row = conn.execute(
-        "SELECT i.*, g.lat AS lat, g.lng AS lng FROM incident_state i "
+        "SELECT i.*, g.lat AS lat, g.lng AS lng, g.precise AS precise FROM incident_state i "
         "LEFT JOIN geocode_cache g ON i.location = g.address "
         "WHERE i.number = ?", (number,)
     ).fetchone()
@@ -1365,12 +1407,13 @@ def public_clip(filename: str):
                                  "Access-Control-Allow-Origin": "*"})
 
 @app.get("/api/state", dependencies=[Depends(require_auth)])
-def get_state():
+def get_state(scope: str = "window"):
     ensure_state_ready()
+    scope = "all" if scope == "all" else "window"  # default light; "all" on demand
     stat = LOG_FILE.stat() if LOG_FILE.exists() else None
     entries = parse_log()
     with _db() as conn:
-        incidents = incident_rows_from_db(conn)
+        incidents = incident_rows_from_db(conn, scope=scope)
     feed = entries[-250:]
     return JSONResponse({
         "entries": feed,
