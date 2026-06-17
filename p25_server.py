@@ -108,7 +108,9 @@ def _within_range(lat: float, lng: float) -> bool:
 def _cache_geocode(norm: str, lat: float, lng: float, precise: bool = True):
     with _db() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, cached_at, precise) VALUES(?, ?, ?, ?, ?)",
+            "INSERT INTO geocode_cache(address, lat, lng, cached_at, precise) VALUES(?, ?, ?, ?, ?) "
+            "ON CONFLICT(address) DO UPDATE SET lat=excluded.lat, lng=excluded.lng, "
+            "cached_at=excluded.cached_at, precise=excluded.precise",
             (norm, lat, lng, datetime.now().isoformat(), 1 if precise else 0),
         )
 
@@ -253,11 +255,12 @@ async def _geocode_worker():
         try:
             with _db() as conn:
                 rows = conn.execute("""
-                    SELECT DISTINCT i.location FROM incident_state i
+                    SELECT i.location FROM incident_state i
                     LEFT JOIN geocode_cache g ON i.location = g.address
                     WHERE g.address IS NULL
                       AND lower(i.location) NOT IN ('unknown','','n/a','none','n/a.')
-                    ORDER BY i.number DESC
+                    GROUP BY i.location
+                    ORDER BY MAX(i.number) DESC
                 """).fetchall()
             pending = [r["location"] for r in rows if r["location"] not in _geocode_failed]
             if pending:
@@ -861,12 +864,111 @@ def read_full_log() -> list[str]:
 
 # ── Durable state ────────────────────────────────────────────────────────────
 
-def _db() -> sqlite3.Connection:
+# ── DB backend ──────────────────────────────────────────────────────────────────
+# sqlite (default, the live backend) or postgres (DB_BACKEND=postgres). The PG path
+# wraps psycopg3 to mimic the sqlite3 API used throughout: ? placeholders, rows that
+# support both ["col"] and [int], and `with _db() as conn:` committing on success.
+DB_BACKEND = os.environ.get("DB_BACKEND", "sqlite").lower()
+PG_DSN = os.environ.get("P25_PG_DSN", "host=127.0.0.1 dbname=p25 user=p25 password=p25test")
+
+if DB_BACKEND == "postgres":
+    import psycopg
+
+    class _PgRow:
+        """sqlite3.Row-like: supports row['col'] and row[int]; is NOT a dict."""
+        __slots__ = ("_cols", "_vals")
+        def __init__(self, cols, vals):
+            self._cols = cols   # {name: index}
+            self._vals = vals
+        def __getitem__(self, k):
+            return self._vals[k] if isinstance(k, int) else self._vals[self._cols[k]]
+        def keys(self):
+            return list(self._cols)
+
+    def _pg_row_factory(cursor):
+        cols = {d.name: i for i, d in enumerate(cursor.description or [])}
+        return lambda vals: _PgRow(cols, vals)
+
+    class _PgConn:
+        def __init__(self):
+            self._c = psycopg.connect(PG_DSN, row_factory=_pg_row_factory)
+        @staticmethod
+        def _x(sql: str) -> str:
+            return sql.replace("?", "%s")   # sqlite ? -> psycopg %s
+        def execute(self, sql, params=()):
+            return self._c.execute(self._x(sql), params)
+        def executemany(self, sql, seq):
+            cur = self._c.cursor()
+            cur.executemany(self._x(sql), list(seq))
+            return cur
+        def cursor(self):
+            return self._c.cursor()
+        def commit(self):
+            self._c.commit()
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, *_a):
+            try:
+                self._c.commit() if exc_type is None else self._c.rollback()
+            finally:
+                self._c.close()
+            return False
+
+# Postgres mirrors the sqlite column types (TEXT dates, INTEGER flags) so the existing
+# queries work unchanged; geocode_cache adds a PostGIS geom kept in sync by a trigger.
+_PG_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS transmissions (
+        id BIGINT PRIMARY KEY, time TEXT, talkgroup TEXT, agency TEXT,
+        text TEXT, raw_line TEXT, wav_file TEXT)""",
+    """CREATE TABLE IF NOT EXISTS incident_state (
+        number INTEGER PRIMARY KEY, title TEXT, agency TEXT, status TEXT,
+        status_kind TEXT, location TEXT, details_json TEXT, action TEXT,
+        first_seen TEXT, last_seen TEXT, updated_at TEXT,
+        priority INTEGER NOT NULL DEFAULT 3, first_tx_id BIGINT NOT NULL DEFAULT 0,
+        last_tx_id BIGINT NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0)""",
+    """CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT)""",
+    """CREATE TABLE IF NOT EXISTS summary_jobs (
+        id BIGSERIAL PRIMARY KEY, mode TEXT, from_tx_id BIGINT, to_tx_id BIGINT,
+        status TEXT, output TEXT DEFAULT '', error TEXT DEFAULT '',
+        created_at TEXT, completed_at TEXT DEFAULT '')""",
+    """CREATE TABLE IF NOT EXISTS geocode_cache (
+        address TEXT PRIMARY KEY, lat DOUBLE PRECISION, lng DOUBLE PRECISION,
+        cached_at TEXT, precise INTEGER NOT NULL DEFAULT 1,
+        geom geography(Point,4326))""",
+    """CREATE TABLE IF NOT EXISTS incident_tx (
+        incident_number INTEGER, tx_id BIGINT, time TEXT DEFAULT '',
+        talkgroup TEXT DEFAULT '', PRIMARY KEY (incident_number, tx_id))""",
+    "CREATE INDEX IF NOT EXISTS incident_state_board ON incident_state (status_kind, priority)",
+    "CREATE INDEX IF NOT EXISTS incident_state_lastseen ON incident_state (last_seen DESC)",
+    "CREATE INDEX IF NOT EXISTS geocode_geom_gix ON geocode_cache USING GIST (geom)",
+    """CREATE OR REPLACE FUNCTION geocode_set_geom() RETURNS trigger AS $$
+       BEGIN
+         IF NEW.lat IS NOT NULL AND NEW.lng IS NOT NULL THEN
+           NEW.geom := ST_SetSRID(ST_MakePoint(NEW.lng, NEW.lat), 4326)::geography;
+         END IF;
+         RETURN NEW;
+       END; $$ LANGUAGE plpgsql""",
+    "DROP TRIGGER IF EXISTS geocode_geom_t ON geocode_cache",
+    """CREATE TRIGGER geocode_geom_t BEFORE INSERT OR UPDATE ON geocode_cache
+       FOR EACH ROW EXECUTE FUNCTION geocode_set_geom()""",
+]
+
+def _init_pg_schema() -> None:
+    with _db() as conn:
+        for stmt in _PG_SCHEMA:
+            conn.execute(stmt)
+
+def _db():
+    if DB_BACKEND == "postgres":
+        return _PgConn()
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_state_db() -> None:
+    if DB_BACKEND == "postgres":
+        _init_pg_schema()
+        return
     with _db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS transmissions (
@@ -1055,7 +1157,8 @@ def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
     # OR IGNORE: concurrent ensure_state_ready() calls race on the same new
     # rows; ids are deterministic (log position) so dropping dupes is safe.
     conn.executemany(
-        "INSERT OR IGNORE INTO transmissions(id, time, talkgroup, agency, text, wav_file, raw_line) VALUES(?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO transmissions(id, time, talkgroup, agency, text, wav_file, raw_line) VALUES(?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO NOTHING",
         new_rows,
     )
     return len(rows)
@@ -1064,10 +1167,13 @@ def incident_rows_from_db(conn: sqlite3.Connection, scope: str = "all") -> list[
     # scope="window": light default for the live poll — every open incident (any
     # age) plus anything cleared in the last 24h. Covers all default board/map
     # views; the full history is only fetched when the user picks "All".
-    where = ""
+    where, params = "", ()
     if scope == "window":
-        where = ("WHERE i.status_kind != 'clear' "
-                 "OR i.last_seen >= datetime('now', 'localtime', '-24 hours') ")
+        # Compute the 24h cutoff in Python (portable text compare) instead of a
+        # backend-specific datetime() call. last_seen is "YYYY-MM-DD HH:MM:SS" (sortable).
+        cutoff = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        where = "WHERE i.status_kind != 'clear' OR i.last_seen >= ? "
+        params = (cutoff,)
     rows = conn.execute(
         "SELECT i.*, g.lat AS lat, g.lng AS lng, g.precise AS precise FROM incident_state i "
         "LEFT JOIN geocode_cache g ON i.location = g.address "
@@ -1075,7 +1181,8 @@ def incident_rows_from_db(conn: sqlite3.Connection, scope: str = "all") -> list[
         "ORDER BY "
         "CASE i.status_kind WHEN 'active' THEN 0 WHEN 'routine' THEN 1 WHEN 'clear' THEN 2 ELSE 0 END, "
         "i.priority ASC, "
-        "i.last_seen DESC"
+        "i.last_seen DESC",
+        params
     ).fetchall()
     return [_incident_row_to_api(row) for row in rows]
 
@@ -1101,9 +1208,9 @@ def _incident_age_seconds(last_seen: str) -> int | None:
     return max(0, age)
 
 def _incident_is_stale(row_or_inc) -> bool:
-    if (row_or_inc["status_kind"] if isinstance(row_or_inc, sqlite3.Row) else row_or_inc.get("status_kind")) == "clear":
+    if (row_or_inc.get("status_kind") if isinstance(row_or_inc, dict) else row_or_inc["status_kind"]) == "clear":
         return False
-    last_seen = row_or_inc["last_seen"] if isinstance(row_or_inc, sqlite3.Row) else row_or_inc.get("last_seen", "")
+    last_seen = row_or_inc.get("last_seen", "") if isinstance(row_or_inc, dict) else row_or_inc["last_seen"]
     age = _incident_age_seconds(last_seen)
     return age is not None and age > STALE_DISPLAY_SECONDS
 
@@ -1283,7 +1390,8 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
         ).fetchall()
         if attributed:
             conn.executemany(
-                "INSERT OR IGNORE INTO incident_tx(incident_number, tx_id, time, talkgroup) VALUES(?, ?, ?, ?)",
+                "INSERT INTO incident_tx(incident_number, tx_id, time, talkgroup) VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(incident_number, tx_id) DO NOTHING",
                 [(number, t["id"], t["time"], t["talkgroup"]) for t in attributed],
             )
             newest = _tx_time_to_datetime_str(attributed[-1]["time"])
@@ -2198,10 +2306,11 @@ async def summarize(req: SummarizeReq, auth: dict = Depends(require_auth)):
                 current_incidents = incident_rows_from_db(conn)
                 incident_context = incident_board_context_from_incidents(current_incidents)
                 cur = conn.execute(
-                    "INSERT INTO summary_jobs(mode, from_tx_id, to_tx_id, status, created_at) VALUES(?, ?, ?, ?, ?)",
+                    "INSERT INTO summary_jobs(mode, from_tx_id, to_tx_id, status, created_at) VALUES(?, ?, ?, ?, ?) "
+                    "RETURNING id",
                     (mode, from_tx_id + 1, to_tx_id, "running", created_at),
                 )
-                job_id = cur.lastrowid
+                job_id = cur.fetchone()[0]
 
             prompt = INCREMENTAL_JSON_TEMPLATE.format(
                 incident_context=incident_context,
