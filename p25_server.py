@@ -539,7 +539,10 @@ def parse_log() -> list[dict]:
             tx_entry: dict = {"type":"tx","id":f"tx-{tx_count}",
                             "time":m.group(1),"talkgroup":tg,
                             "agency":_agency(tg),"trunk":m.group(3) or _trunk(tg),"text":m.group(5)}
-            if m.group(4) and (AUDIO_CLIPS_DIR / m.group(4)).exists():
+            # NOTE: do not stat the clip here — at ~85k lines that's 85k syscalls
+            # per call (made /api/state take 15-20s). The clip endpoint 404s if a
+            # file is missing; this matches sync_transmissions_from_log.
+            if m.group(4):
                 tx_entry["wav_file"] = m.group(4)
             entries.append(tx_entry)
             tx_count += 1
