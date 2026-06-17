@@ -1602,6 +1602,60 @@ def get_alpr_public():
     """Public (unauth) ALPR cameras for the embed view — data is public (DeFlock/OSM)."""
     return JSONResponse(_alpr_payload(), headers={"Cache-Control": "public, max-age=3600"})
 
+def _hotspots_payload(min_count: int = 3, eps_m: int = 300) -> dict:
+    """PostGIS DBSCAN clusters of all-time precise incidents = chronic recurring-call
+    locations, ranked by count, with priority mix and a 24h activity histogram."""
+    if DB_BACKEND != "postgres":
+        return {"clusters": [], "note": "hotspots require the postgres backend"}
+    eps_deg = max(eps_m, 50) / 111_000.0   # metres -> degrees (rough, fine at this latitude)
+    sql = (
+        "SELECT cid, lat, lng, location, priority, substr(last_seen,12,2) AS hr FROM ("
+        "  SELECT i.location, i.priority, i.last_seen, g.lat, g.lng, "
+        "  ST_ClusterDBSCAN(g.geom::geometry, eps := ?, minpoints := ?) OVER () AS cid "
+        "  FROM incident_state i JOIN geocode_cache g ON i.location = g.address "
+        "  WHERE g.precise = 1 AND g.geom IS NOT NULL"
+        ") z WHERE cid IS NOT NULL"
+    )
+    from collections import Counter
+    groups: dict = {}
+    with _db() as conn:
+        rows = conn.execute(sql, (eps_deg, min_count)).fetchall()
+    for r in rows:
+        c = groups.setdefault(r["cid"], {"lat": 0.0, "lng": 0.0, "n": 0,
+                                         "locs": Counter(), "prio": Counter(), "hours": [0] * 24})
+        c["lat"] += r["lat"]; c["lng"] += r["lng"]; c["n"] += 1
+        if r["location"]:
+            c["locs"][r["location"]] += 1
+        c["prio"][int(r["priority"] or 3)] += 1
+        try:
+            c["hours"][int(r["hr"])] += 1
+        except (TypeError, ValueError):
+            pass
+    out = []
+    for c in groups.values():
+        n = c["n"]
+        out.append({
+            "n": n,
+            "lat": round(c["lat"] / n, 5),
+            "lng": round(c["lng"] / n, 5),
+            "label": (c["locs"].most_common(1)[0][0] if c["locs"] else "Unknown"),
+            "priorities": {str(k): c["prio"][k] for k in sorted(c["prio"])},
+            "hours": c["hours"],
+            "peak_hour": max(range(24), key=lambda h: c["hours"][h]),
+        })
+    out.sort(key=lambda x: -x["n"])
+    return {"clusters": out}
+
+@app.get("/api/hotspots", dependencies=[Depends(require_auth)])
+def get_hotspots(min_count: int = 3, eps_m: int = 300):
+    return JSONResponse(_hotspots_payload(min_count, eps_m),
+                        headers={"Cache-Control": "public, max-age=300"})
+
+@app.get("/api/public/hotspots")
+def get_hotspots_public(min_count: int = 3, eps_m: int = 300):
+    return JSONResponse(_hotspots_payload(min_count, eps_m),
+                        headers={"Cache-Control": "public, max-age=300"})
+
 @app.get("/api/state", dependencies=[Depends(require_auth)])
 def get_state(scope: str = "window"):
     ensure_state_ready()

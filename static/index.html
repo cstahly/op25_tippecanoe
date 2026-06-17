@@ -391,6 +391,13 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                           color: var(--text); }
 .map-filter-btn.dimmed { opacity: .35; pointer-events: none; }
 .map-filter-btn.alpr-on { background: rgba(220,38,38,.2); border-color: #dc2626; color: #fca5a5; }
+.map-filter-btn.hotspot-on { background: rgba(249,115,22,.22); border-color: #f97316; color: #fdba74; }
+.hotspot-pin { border-radius: 50%; border: 2px solid #fff; color: #fff; font-weight: 800;
+  display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 6px rgba(0,0,0,.45);
+  cursor: pointer; }
+.hs-title { font-size: 13px; font-weight: 800; line-height: 1.25; }
+.hs-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.hs-axis { font-size: 9px; color: var(--muted); font-family: monospace; }
 .alpr-cam { width: 12px; height: 12px; border-radius: 50%; background: #dc2626; border: 2px solid #fff;
   box-shadow: 0 0 5px rgba(220,38,38,.9); position: relative; }
 .alpr-dir { position: absolute; left: 50%; bottom: 50%; width: 0; height: 0;
@@ -519,6 +526,7 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
       <div class="map-filter-sep"></div>
       <button class="map-filter-btn" id="map-heat-toggle">Heatmap</button>
       <button class="map-filter-btn" id="map-alpr-toggle" title="Flock/ALPR cameras (via DeFlock/OSM)">ALPR</button>
+      <button class="map-filter-btn" id="map-hotspot-toggle" title="Chronic recurring-call locations (all-time clusters)">Hotspots</button>
     </div>
     <div class="map-status-bar" id="map-status-bar"></div>
   </div>
@@ -1748,6 +1756,58 @@ document.getElementById('map-alpr-toggle')?.addEventListener('click', async () =
   _alprLayer.addTo(_map);
 });
 
+// ── Hotspots (chronic recurring-call clusters, PostGIS DBSCAN) ──────────────────
+const _HS_PRIO_COLORS = { 1: '#a855f7', 2: '#ef4444', 3: '#eab308', 4: '#0ea5e9', 5: '#475569' };
+
+function _hotspotIcon(c, maxN) {
+  const size = Math.round(24 + 34 * Math.sqrt(c.n / maxN));   // 24–58px by count
+  const t = Math.min(1, c.n / maxN);
+  const col = `hsl(${Math.round(30 - 30 * t)},92%,${Math.round(56 - 14 * t)}%)`;  // orange→red
+  return L.divIcon({ className: 'hotspot-wrap', iconSize: [size, size], iconAnchor: [size / 2, size / 2],
+    html: `<div class="hotspot-pin" style="width:${size}px;height:${size}px;background:${col};` +
+          `font-size:${Math.max(11, Math.round(size * 0.36))}px">${c.n}</div>` });
+}
+
+function _hotspotPopup(c) {
+  const bars = Object.entries(c.priorities).map(([p, n]) =>
+    `<span style="display:inline-block;background:${_HS_PRIO_COLORS[p] || '#475569'};color:#fff;` +
+    `border-radius:3px;padding:0 5px;margin:0 3px 3px 0;font-size:11px;font-weight:700">P${p} ${n}</span>`).join('');
+  const max = Math.max(...c.hours, 1);
+  const spark = c.hours.map((h, i) =>
+    `<rect x="${i * 5}" y="${24 - (h / max * 22)}" width="4" height="${(h / max * 22).toFixed(1)}" ` +
+    `fill="${i === c.peak_hour ? '#ef4444' : '#94a3b8'}"/>`).join('');
+  return `<div class="hs-title">${escHtml(c.label)}</div>` +
+    `<div class="hs-sub"><b>${c.n}</b> calls · peak <b>${String(c.peak_hour).padStart(2, '0')}:00</b></div>` +
+    `<div style="margin:5px 0 2px">${bars}</div>` +
+    `<svg width="120" height="26" style="display:block">${spark}</svg>` +
+    `<div class="hs-axis">0h&nbsp;&nbsp;&nbsp;&nbsp;6h&nbsp;&nbsp;&nbsp;&nbsp;12h&nbsp;&nbsp;&nbsp;&nbsp;18h&nbsp;&nbsp;23h</div>`;
+}
+
+async function _ensureHotspots() {
+  if (_hotspotData) return _hotspotData;
+  try {
+    const r = await fetch('/api/hotspots', { headers: authHeader(), cache: 'no-store' });
+    _hotspotData = (await r.json()).clusters || [];
+  } catch (_) { _hotspotData = []; }
+  return _hotspotData;
+}
+
+document.getElementById('map-hotspot-toggle')?.addEventListener('click', async () => {
+  _hotspotMode = !_hotspotMode;
+  document.getElementById('map-hotspot-toggle').classList.toggle('hotspot-on', _hotspotMode);
+  if (!_hotspotMode) {
+    if (_hotspotLayer) { _map.removeLayer(_hotspotLayer); _hotspotLayer = null; }
+    return;
+  }
+  await initMap();
+  const cl = await _ensureHotspots();
+  if (_hotspotLayer) _map.removeLayer(_hotspotLayer);
+  const maxN = Math.max(...cl.map(c => c.n), 1);
+  _hotspotLayer = L.layerGroup(cl.map(c => L.marker([c.lat, c.lng], { icon: _hotspotIcon(c, maxN) })
+    .bindPopup(_hotspotPopup(c), { maxWidth: 200 })));
+  _hotspotLayer.addTo(_map);
+});
+
 // ── Live audio ────────────────────────────────────────────────────────────────
 let _audioEl = null;
 let _audioLoading = false;
@@ -1924,6 +1984,9 @@ let _map           = null;
 let _mapMarkers    = {};   // incident number → Leaflet marker
 let _heatMode      = false; // heatmap vs pins
 let _heatLayer     = null;
+let _hotspotMode   = false; // chronic recurring-call clusters overlay
+let _hotspotLayer  = null;
+let _hotspotData   = null;
 let _alprMode      = false; // Flock/ALPR camera overlay (independent of pins/heat)
 let _alprLayer     = null;
 let _alprData      = null;
