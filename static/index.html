@@ -391,7 +391,12 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
                           color: var(--text); }
 .map-filter-btn.dimmed { opacity: .35; pointer-events: none; }
 .map-filter-btn.alpr-on { background: rgba(220,38,38,.2); border-color: #dc2626; color: #fca5a5; }
-.map-filter-btn.hotspot-on { background: rgba(249,115,22,.22); border-color: #f97316; color: #fdba74; }
+/* primary view segment reads stronger than the secondary filters */
+.map-filter-btn.view { font-weight: 800; }
+.map-filter-btn.view.active { background: var(--police); border-color: var(--police); color: #fff; }
+/* incident-only filters flow inline in the bar, hidden in heatmap/hotspots views */
+.map-incident-filters { display: contents; }
+.map-incident-filters.hidden { display: none; }
 .hotspot-pin { border-radius: 50%; border: 2px solid #fff; color: #fff; font-weight: 800;
   display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 6px rgba(0,0,0,.45);
   cursor: pointer; }
@@ -515,18 +520,22 @@ header { background: var(--surface); border-bottom: 1px solid var(--border);
   <div id="map-view">
     <div id="leaflet-map"></div>
     <div class="map-filter-bar">
-      <button class="map-filter-btn" data-mf-status="critical">Critical</button>
-      <button class="map-filter-btn" data-mf-status="live">Active</button>
-      <button class="map-filter-btn active" data-mf-status="all">All</button>
+      <button class="map-filter-btn view active" data-mapview="incidents">Incidents</button>
+      <button class="map-filter-btn view" data-mapview="heatmap">Heatmap</button>
+      <button class="map-filter-btn view" data-mapview="hotspots">Hotspots</button>
       <div class="map-filter-sep"></div>
-      <button class="map-filter-btn" data-mf-hours="">All</button>
-      <button class="map-filter-btn active" data-mf-hours="4">4h</button>
-      <button class="map-filter-btn" data-mf-hours="12">12h</button>
-      <button class="map-filter-btn" data-mf-hours="24">24h</button>
-      <div class="map-filter-sep"></div>
-      <button class="map-filter-btn" id="map-heat-toggle">Heatmap</button>
-      <button class="map-filter-btn" id="map-alpr-toggle" title="Flock/ALPR cameras (via DeFlock/OSM)">ALPR</button>
-      <button class="map-filter-btn" id="map-hotspot-toggle" title="Chronic recurring-call locations (all-time clusters)">Hotspots</button>
+      <button class="map-filter-btn" id="map-alpr-toggle" title="Flock/ALPR cameras (via DeFlock/OSM) — overlay on any view">ALPR</button>
+      <div class="map-incident-filters" id="map-incident-filters">
+        <div class="map-filter-sep"></div>
+        <button class="map-filter-btn" data-mf-status="critical">Critical</button>
+        <button class="map-filter-btn" data-mf-status="live">Active</button>
+        <button class="map-filter-btn active" data-mf-status="all">All</button>
+        <div class="map-filter-sep"></div>
+        <button class="map-filter-btn" data-mf-hours="">All</button>
+        <button class="map-filter-btn active" data-mf-hours="4">4h</button>
+        <button class="map-filter-btn" data-mf-hours="12">12h</button>
+        <button class="map-filter-btn" data-mf-hours="24">24h</button>
+      </div>
     </div>
     <div class="map-status-bar" id="map-status-bar"></div>
   </div>
@@ -728,7 +737,7 @@ let wantAllIncidents = false;  // true only while viewing board "All" or map all
 // The live poll fetches a light 24h window by default; switch to the full history
 // (and back) only when the user selects a view that needs it.
 function updateIncidentScope() {
-  const want = incidentFilter === 'all' || _mapFilterHours == null || _heatMode;
+  const want = incidentFilter === 'all' || _mapFilterHours == null || _mapView === 'heatmap';
   if (want !== wantAllIncidents) {
     wantAllIncidents = want;
     syncEntries();  // immediate refetch at the new scope
@@ -1707,18 +1716,18 @@ document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(btn => {
   };
 });
 
-document.getElementById('map-heat-toggle')?.addEventListener('click', () => {
-  _heatMode = !_heatMode;
-  document.getElementById('map-heat-toggle').classList.toggle('active', _heatMode);
-  if (_heatMode) {
-    // Heatmap is an all-time, all-data aggregate by default.
-    _mapFilterHours = null;
-    document.querySelectorAll('.map-filter-btn[data-mf-hours]').forEach(b =>
-      b.classList.toggle('active', b.dataset.mfHours === ''));
-    try { _syncActiveFilterDim(); } catch (_) {}
-  }
+// View segment: Incidents / Heatmap / Hotspots are mutually exclusive. The
+// status+time filters only apply to (and only show in) the Incidents view.
+function _setMapView(view) {
+  _mapView = view;
+  document.querySelectorAll('.map-filter-btn[data-mapview]').forEach(b =>
+    b.classList.toggle('active', b.dataset.mapview === view));
+  document.getElementById('map-incident-filters')?.classList.toggle('hidden', view !== 'incidents');
   updateIncidentScope();
   renderMap();
+}
+document.querySelectorAll('.map-filter-btn[data-mapview]').forEach(btn => {
+  btn.onclick = () => _setMapView(btn.dataset.mapview);
 });
 
 // ── ALPR (Flock) camera overlay ───────────────────────────────────────────────
@@ -1792,21 +1801,17 @@ async function _ensureHotspots() {
   return _hotspotData;
 }
 
-document.getElementById('map-hotspot-toggle')?.addEventListener('click', async () => {
-  _hotspotMode = !_hotspotMode;
-  document.getElementById('map-hotspot-toggle').classList.toggle('hotspot-on', _hotspotMode);
-  if (!_hotspotMode) {
-    if (_hotspotLayer) { _map.removeLayer(_hotspotLayer); _hotspotLayer = null; }
-    return;
-  }
-  await initMap();
+async function _renderHotspots() {
   const cl = await _ensureHotspots();
+  if (_mapView !== 'hotspots') return;            // view changed while fetching
   if (_hotspotLayer) _map.removeLayer(_hotspotLayer);
   const maxN = Math.max(...cl.map(c => c.n), 1);
   _hotspotLayer = L.layerGroup(cl.map(c => L.marker([c.lat, c.lng], { icon: _hotspotIcon(c, maxN) })
     .bindPopup(_hotspotPopup(c), { maxWidth: 200 })));
   _hotspotLayer.addTo(_map);
-});
+  const bar = document.getElementById('map-status-bar');
+  if (bar) bar.textContent = `${cl.length} recurring-call hotspots`;
+}
 
 // ── Live audio ────────────────────────────────────────────────────────────────
 let _audioEl = null;
@@ -1982,9 +1987,8 @@ document.getElementById('share-modal').addEventListener('click', e => {
 let _leafletLoaded = false;
 let _map           = null;
 let _mapMarkers    = {};   // incident number → Leaflet marker
-let _heatMode      = false; // heatmap vs pins
+let _mapView       = 'incidents'; // 'incidents' | 'heatmap' | 'hotspots' (mutually exclusive views)
 let _heatLayer     = null;
-let _hotspotMode   = false; // chronic recurring-call clusters overlay
 let _hotspotLayer  = null;
 let _hotspotData   = null;
 let _alprMode      = false; // Flock/ALPR camera overlay (independent of pins/heat)
@@ -2231,17 +2235,27 @@ function _spreadCoincident(list) {
   return out;
 }
 
+function _clearPins() {
+  for (const [id, marker] of Object.entries(_mapMarkers)) { marker.remove(); delete _mapMarkers[id]; }
+}
+function _clearHeat()    { if (_heatLayer)    { _map.removeLayer(_heatLayer);    _heatLayer = null; } }
+function _clearHotspot() { if (_hotspotLayer) { _map.removeLayer(_hotspotLayer); _hotspotLayer = null; } }
+
+// Three mutually-exclusive views. The ALPR overlay is independent and left alone.
 function renderMap() {
   if (!_map) return;
-  if (_heatMode) return _renderHeat();
-  if (_heatLayer) { _map.removeLayer(_heatLayer); _heatLayer = null; }
+  if (_mapView === 'heatmap')  { _clearPins(); _clearHotspot(); return _renderHeat(); }
+  if (_mapView === 'hotspots') { _clearPins(); _clearHeat();    return _renderHotspots(); }
+  _clearHeat(); _clearHotspot();
+  _renderPins();
+}
+
+function _renderPins() {
   const showable = incidents.filter(_mapFilterMatch);
   const showIds = new Set(showable.map(i => String(i.number)));
-
   for (const [id, marker] of Object.entries(_mapMarkers)) {
     if (!showIds.has(id)) { marker.remove(); delete _mapMarkers[id]; }
   }
-
   for (const [incident, lat, lng] of _spreadCoincident(showable)) {
     const id = String(incident.number);
     if (_mapMarkers[id]) {
@@ -2257,30 +2271,23 @@ function renderMap() {
 }
 
 function _renderHeat() {
-  // Heatmap mode: clear pins, draw density from precise points only (drops the
-  // city-centroid garbage that would otherwise be one giant fake hotspot).
-  for (const [id, marker] of Object.entries(_mapMarkers)) { marker.remove(); delete _mapMarkers[id]; }
+  // All-time density of precise points (excludes the city-centroid garbage).
+  // Heatmap is its own view, so it ignores the status/time filters; the agency
+  // and trunk header tabs still apply.
+  if (!window.L || !L.heatLayer) return;
   const pts = incidents
-    .filter(_mapFilterMatch)
-    .filter(i => i.precise !== 0)
+    .filter(i => i.precise !== 0 && i.lat != null && _mapAgencyMatch(i.agency) && _mapTrunkMatch(i.agency))
     .map(i => [i.lat, i.lng, 1]);
-  if (!window.L || !L.heatLayer) { _updateMapStatus(0); return; }
-  if (_heatLayer) {
-    _heatLayer.setLatLngs(pts);
-  } else {
-    _heatLayer = L.heatLayer(pts, { radius: 22, blur: 18, maxZoom: 16, minOpacity: 0.25 });
-    _heatLayer.addTo(_map);
-  }
-  _updateMapStatus(pts.length);
+  if (_heatLayer) _heatLayer.setLatLngs(pts);
+  else { _heatLayer = L.heatLayer(pts, { radius: 22, blur: 18, maxZoom: 16, minOpacity: 0.25 }); _heatLayer.addTo(_map); }
+  const bar = document.getElementById('map-status-bar');
+  if (bar) bar.textContent = `${pts.length} points · heatmap`;
 }
 
 function goToIncidentOnMap(number) {
   const incident = findIncident(number);
   if (!incident || incident.lat == null || incident.lng == null) return;
-  if (_heatMode) {  // jumping to a specific incident -> show pins, not the heat layer
-    _heatMode = false;
-    document.getElementById('map-heat-toggle')?.classList.remove('active');
-  }
+  if (_mapView !== 'incidents') _setMapView('incidents');  // a specific incident needs pins
 
   // Default to All/4h; only widen the time window if the target incident is older.
   const ageHrs = incident.last_seen
