@@ -1356,14 +1356,27 @@ def seed_incident_state(conn: sqlite3.Connection) -> None:
             continue
         _upsert_incident(conn, inc, inc.get("last_seen") or inc.get("summary_time") or "")
 
+_ensure_state_cache = {"size": -1, "mtime": 0.0}
+
 def ensure_state_ready() -> None:
     init_state_db()
+    # sync_transmissions_from_log re-parses the whole log; skip it when the log
+    # is unchanged so this is cheap to call on every poll (incl. /api/transmissions).
+    try:
+        st = LOG_FILE.stat()
+        if st.st_size == _ensure_state_cache["size"] and st.st_mtime == _ensure_state_cache["mtime"]:
+            return
+    except OSError:
+        st = None
     with _db() as conn:
         tx_count = sync_transmissions_from_log(conn)
         seed_incident_state(conn)
         if not _get_state(conn, "last_summarized_tx_id"):
             _set_state(conn, "last_summarized_tx_id", str(_last_valid_summary_tx_id_from_log()))
         _set_state(conn, "last_tx_id", str(tx_count))
+    if st is not None:
+        _ensure_state_cache["size"] = st.st_size
+        _ensure_state_cache["mtime"] = st.st_mtime
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -1373,6 +1386,7 @@ def get_entries():
 
 @app.get("/api/transmissions", dependencies=[Depends(require_auth)])
 def get_transmissions(limit: int = 50, before_id: int = 0, after_id: int = 0, from_id: int = 0, to_id: int = 0):
+    ensure_state_ready()  # sync new log lines so the live feed actually updates
     limit = max(1, min(limit, 500))
     with _db() as conn:
         if from_id and to_id:
