@@ -1303,11 +1303,16 @@ def _tx_time_to_datetime_str(hms: str) -> str:
 
 ALERT_EMAIL = os.environ.get("P25_ALERT_EMAIL", "cstahly@gmail.com")
 PUBLIC_URL  = os.environ.get("P25_PUBLIC_URL", "https://p25.sadbabyrabbit.com")
+# P1 email alerts are OFF by default (too noisy). The alerted-state machine still
+# runs; only the actual send is suppressed. Set P25_P1_EMAIL=1 to re-enable.
+P1_EMAIL_ENABLED = os.environ.get("P25_P1_EMAIL", "0").strip().lower() in ("1", "true", "yes", "on")
 
 def _send_p1_alert(number: int, title: str, agency: str, location: str,
                    status: str, details: list, action: str) -> None:
     """Email a P1 incident via the localhost postfix relay. Never raises into the
     caller — a mail failure must not break the summary write."""
+    if not P1_EMAIL_ENABLED:
+        return
     import smtplib
     from email.message import EmailMessage
     try:
@@ -1335,6 +1340,8 @@ def _send_p1_alert(number: int, title: str, agency: str, location: str,
 def _send_p1_resolved(number: int, title: str, agency: str, location: str,
                       status: str, priority: int, details: list, action: str) -> None:
     """Email the follow-up when a previously-alerted P1 drops below P1 or clears."""
+    if not P1_EMAIL_ENABLED:
+        return
     import smtplib
     from email.message import EmailMessage
     try:
