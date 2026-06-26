@@ -347,6 +347,7 @@ async def _run_auto_summary_once() -> int:
 @app.on_event("startup")
 async def _startup():
     ensure_state_ready()
+    _init_push_state()
     asyncio.create_task(_audio_broadcast_loop())
     asyncio.create_task(_geocode_worker())
     asyncio.create_task(_auto_summary_worker())
@@ -938,6 +939,11 @@ _PG_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS incident_tx (
         incident_number INTEGER, tx_id BIGINT, time TEXT DEFAULT '',
         talkgroup TEXT DEFAULT '', PRIMARY KEY (incident_number, tx_id))""",
+    """CREATE TABLE IF NOT EXISTS device_tokens (
+        token TEXT PRIMARY KEY, platform TEXT DEFAULT 'ios',
+        environment TEXT DEFAULT 'sandbox', prefs_json TEXT DEFAULT '{}',
+        created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '')""",
+    "ALTER TABLE incident_state ADD COLUMN IF NOT EXISTS notified INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS incident_state_board ON incident_state (status_kind, priority)",
     "CREATE INDEX IF NOT EXISTS incident_state_lastseen ON incident_state (last_seen DESC)",
     "CREATE INDEX IF NOT EXISTS geocode_geom_gix ON geocode_cache USING GIST (geom)",
@@ -1024,6 +1030,14 @@ def init_state_db() -> None:
             talkgroup TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (incident_number, tx_id)
         );
+        CREATE TABLE IF NOT EXISTS device_tokens (
+            token TEXT PRIMARY KEY,
+            platform TEXT NOT NULL DEFAULT 'ios',
+            environment TEXT NOT NULL DEFAULT 'sandbox',
+            prefs_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        );
         """)
         try:
             conn.execute("ALTER TABLE transmissions ADD COLUMN wav_file TEXT")
@@ -1043,6 +1057,10 @@ def init_state_db() -> None:
             pass  # column already exists
         try:
             conn.execute("ALTER TABLE incident_state ADD COLUMN alerted INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE incident_state ADD COLUMN notified INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass  # column already exists
         try:
@@ -1367,6 +1385,189 @@ def _send_p1_resolved(number: int, title: str, agency: str, location: str,
     except Exception as exc:
         sys.stderr.write(f"[p1-alert] resolution failed for #{number}: {exc}\n")
 
+# ----------------------------------------------------------------------------
+# Push notifications (APNs, token-based auth). Per-device, configurable iOS
+# pushes — the modern replacement for the email alerts. The whole subsystem is a
+# no-op until the APNs credentials (.p8 key + Key ID + Team ID) are present in
+# the environment, so the server runs fine before they're provisioned.
+# ----------------------------------------------------------------------------
+import queue as _queue, threading as _threading
+
+APNS_KEY_PATH    = os.environ.get("P25_APNS_KEY_PATH", "").strip()
+APNS_KEY_ID      = os.environ.get("P25_APNS_KEY_ID", "").strip()
+APNS_TEAM_ID     = os.environ.get("P25_APNS_TEAM_ID", "").strip()
+APNS_TOPIC       = os.environ.get("P25_APNS_TOPIC", "com.sadbabyrabbit.P25Monitor").strip()
+APNS_DEFAULT_ENV = (os.environ.get("P25_APNS_ENV", "sandbox").strip().lower() or "sandbox")
+_APNS_HOSTS = {
+    "sandbox":    "https://api.sandbox.push.apple.com",
+    "production": "https://api.push.apple.com",
+}
+# Hard cap on what can ever generate a push, regardless of per-device prefs.
+# Keeps volume bounded — P3/P4 chatter never notifies. Devices choose P1 or
+# P1+P2 within this cap via prefs["min_priority"].
+PUSH_MAX_PRIORITY = int(os.environ.get("P25_PUSH_MAX_PRIORITY", "2"))
+
+DEFAULT_PUSH_PREFS = {
+    "muted": False,
+    "min_priority": 1,        # 1 = only P1, 2 = P1+P2
+    "agencies": [],           # allowlist; empty = all agencies
+    "keywords": [],           # if non-empty, at least one must appear in the text
+    "quiet_start": None,      # "HH:MM" local, or null = off
+    "quiet_end": None,        # "HH:MM" local, or null = off
+}
+
+def _apns_configured() -> bool:
+    return bool(APNS_KEY_PATH and APNS_KEY_ID and APNS_TEAM_ID and os.path.exists(APNS_KEY_PATH))
+
+_apns_jwt = {"token": "", "iat": 0.0}
+def _apns_provider_token() -> str:
+    # Apple requires the provider JWT be refreshed every 20-60 min. Refresh at 40.
+    now = time.time()
+    if _apns_jwt["token"] and (now - _apns_jwt["iat"]) < 40 * 60:
+        return _apns_jwt["token"]
+    import jwt as _jwt
+    with open(APNS_KEY_PATH) as f:
+        key = f.read()
+    _apns_jwt["token"] = _jwt.encode(
+        {"iss": APNS_TEAM_ID, "iat": int(now)}, key,
+        algorithm="ES256", headers={"kid": APNS_KEY_ID},
+    )
+    _apns_jwt["iat"] = now
+    return _apns_jwt["token"]
+
+_apns_http = {"client": None}
+def _apns_send(token: str, environment: str, payload: dict):
+    """Send one push. Returns (status_code, body_text). Never raises (0 == local error)."""
+    try:
+        import httpx
+        if _apns_http["client"] is None:
+            _apns_http["client"] = httpx.Client(http2=True, timeout=10.0)
+        host = _APNS_HOSTS.get((environment or APNS_DEFAULT_ENV).lower(), _APNS_HOSTS["sandbox"])
+        r = _apns_http["client"].post(
+            f"{host}/3/device/{token}",
+            headers={
+                "authorization":  f"bearer {_apns_provider_token()}",
+                "apns-topic":     APNS_TOPIC,
+                "apns-push-type": "alert",
+                "apns-priority":  "10",
+            },
+            json=payload,
+        )
+        return r.status_code, r.text
+    except Exception as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+
+def _in_quiet_hours(prefs: dict) -> bool:
+    qs, qe = prefs.get("quiet_start"), prefs.get("quiet_end")
+    if not qs or not qe:
+        return False
+    try:
+        def _m(s):
+            hh, mm = str(s).split(":"); return int(hh) * 60 + int(mm)
+        now_m = datetime.now().hour * 60 + datetime.now().minute
+        s_m, e_m = _m(qs), _m(qe)
+    except Exception:
+        return False
+    if s_m == e_m:
+        return False
+    if s_m < e_m:
+        return s_m <= now_m < e_m
+    return now_m >= s_m or now_m < e_m   # overnight wrap (e.g. 22:00-07:00)
+
+def _push_matches(prefs: dict, priority: int, agency: str, haystack: str) -> bool:
+    if prefs.get("muted"):
+        return False
+    if priority > int(prefs.get("min_priority", 1)):
+        return False
+    agencies = prefs.get("agencies") or []
+    if agencies and agency not in agencies:
+        return False
+    keywords = [str(k).lower().strip() for k in (prefs.get("keywords") or []) if str(k).strip()]
+    if keywords and not any(k in haystack for k in keywords):
+        return False
+    if _in_quiet_hours(prefs):
+        return False
+    return True
+
+_PUSH_Q = _queue.Queue()
+def _queue_incident_push(inc: dict) -> None:
+    """Enqueue a push for an incident (sent off the request/DB path). No-op until
+    APNs creds are provisioned."""
+    if not _apns_configured():
+        return
+    try:
+        _PUSH_Q.put_nowait(inc)
+    except Exception:
+        pass
+
+def _dispatch_incident_push(inc: dict) -> None:
+    with _db() as conn:
+        devices = conn.execute(
+            "SELECT token, environment, prefs_json FROM device_tokens"
+        ).fetchall()
+    if not devices:
+        return
+    number   = int(inc["number"])
+    title    = inc.get("title") or "Incident"
+    agency   = inc.get("agency") or "Unknown"
+    location = inc.get("location") or "Unknown"
+    priority = int(inc.get("priority") or 3)
+    haystack = " ".join([title, agency, location, *(inc.get("details") or [])]).lower()
+    dead, sent = [], 0
+    for d in devices:
+        try:
+            prefs = json.loads(d["prefs_json"] or "{}")
+        except Exception:
+            prefs = {}
+        if not _push_matches(prefs, priority, agency, haystack):
+            continue
+        payload = {
+            "aps": {
+                "alert": {"title": f"P{priority}: {title}", "body": f"{agency} · {location}"},
+                "sound": "default",
+                "thread-id": "p25-incident",
+            },
+            "incident": number,
+        }
+        code, text = _apns_send(d["token"], d["environment"], payload)
+        if code == 200:
+            sent += 1
+        elif code == 410 or (code == 400 and "BadDeviceToken" in text):
+            dead.append(d["token"])   # token retired/invalid -> prune
+        else:
+            sys.stderr.write(f"[push] {d['token'][:8]}.. #{number} -> {code} {text[:140]}\n")
+    if dead:
+        with _db() as conn:
+            for tok in dead:
+                conn.execute("DELETE FROM device_tokens WHERE token = ?", (tok,))
+    if sent or dead:
+        sys.stderr.write(f"[push] #{number} P{priority}: sent={sent} pruned={len(dead)}\n")
+
+def _push_worker() -> None:
+    while True:
+        inc = _PUSH_Q.get()
+        try:
+            _dispatch_incident_push(inc)
+        except Exception as exc:
+            sys.stderr.write(f"[push] dispatch error: {exc}\n")
+        finally:
+            _PUSH_Q.task_done()
+
+_push_thread = _threading.Thread(target=_push_worker, name="p25-push", daemon=True)
+_push_thread.start()
+
+def _init_push_state() -> None:
+    """One-time: mark every incident already on the board as already-notified, so
+    turning push on later doesn't blast the entire backlog. New incidents start at
+    notified=0 and notify normally. Guarded by an app_state flag."""
+    try:
+        with _db() as conn:
+            if _get_state(conn, "push_backfill_done", "") != "1":
+                conn.execute("UPDATE incident_state SET notified = priority WHERE notified = 0")
+                _set_state(conn, "push_backfill_done", "1")
+    except Exception as exc:
+        sys.stderr.write(f"[push] notified-backfill skipped: {exc}\n")
+
 def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id: int = 0, last_tx_id: int = 0) -> None:
     number = int(inc["number"])
     details = inc.get("details") or []
@@ -1379,7 +1580,7 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     status_kind = _status_kind(status, blob)
     if status_kind == "clear":
         priority = max(priority, 4)
-    row = conn.execute("SELECT first_seen, first_tx_id, last_tx_id, alerted FROM incident_state WHERE number = ?", (number,)).fetchone()
+    row = conn.execute("SELECT first_seen, first_tx_id, last_tx_id, alerted, notified FROM incident_state WHERE number = ?", (number,)).fetchone()
     first_seen = row["first_seen"] if row else now
     stored_first_tx_id = int(row["first_tx_id"]) if row and row["first_tx_id"] else 0
     stored_last_tx_id  = int(row["last_tx_id"])  if row and row["last_tx_id"]  else 0
@@ -1464,6 +1665,21 @@ def _upsert_incident(conn: sqlite3.Connection, inc: dict, now: str, first_tx_id:
     elif prior_alerted == 1 and not open_p1:
         conn.execute("UPDATE incident_state SET alerted = 2 WHERE number = ?", (number,))
         _send_p1_resolved(number, title, alert_agency, alert_location, status, priority, alert_details, alert_action)
+
+    # Push-notification dedup, independent of the email/alerted machine so it can
+    # also cover P2. `notified` stores the most-urgent priority already pushed
+    # (0 = never). Push on first notifiable appearance, and again only on an
+    # escalation to a more urgent tier. PUSH_MAX_PRIORITY caps what can ever push;
+    # per-device prefs decide who actually receives it.
+    if status_kind != "clear" and priority <= PUSH_MAX_PRIORITY:
+        prev_notified = int(row["notified"]) if row and row["notified"] is not None else 0
+        if prev_notified == 0 or priority < prev_notified:
+            conn.execute("UPDATE incident_state SET notified = ? WHERE number = ?", (priority, number))
+            _queue_incident_push({
+                "number": number, "title": title, "agency": alert_agency,
+                "location": alert_location, "status": status, "priority": priority,
+                "details": alert_details,
+            })
 
 def seed_incident_state(conn: sqlite3.Connection) -> None:
     existing = conn.execute("SELECT COUNT(*) AS c FROM incident_state").fetchone()["c"]
@@ -2092,6 +2308,19 @@ class IncidentUpdateReq(BaseModel):
     details: list[str] | None = None
     action: str | None = None
 
+class DeviceRegisterReq(BaseModel):
+    token: str
+    platform: str = "ios"
+    environment: str = "sandbox"     # Xcode-signed dev builds get sandbox tokens
+    prefs: dict | None = None        # omit to keep existing / apply defaults
+
+class DevicePrefsReq(BaseModel):
+    token: str
+    prefs: dict
+
+class DeviceTokenReq(BaseModel):
+    token: str
+
 def _chunk_lines(lines: list[str], max_chars: int = 80000) -> list[list[str]]:
     chunks: list[list[str]] = []
     current: list[str] = []
@@ -2251,6 +2480,70 @@ def update_incident(number: int, req: IncidentUpdateReq, auth: dict = Depends(re
         }
         _upsert_incident(conn, inc, now)
         return JSONResponse(_incident_by_number(conn, number), headers={"Cache-Control": "no-store"})
+
+@app.post("/api/devices/register", dependencies=[Depends(require_auth)])
+def register_device(req: DeviceRegisterReq):
+    """Register/refresh an iOS device's APNs token. New devices get DEFAULT_PUSH_PREFS;
+    existing devices keep their prefs unless the caller supplies new ones."""
+    token = req.token.strip()
+    if not token:
+        raise HTTPException(400, detail="token required")
+    env = (req.environment or "sandbox").strip().lower() or "sandbox"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _db() as conn:
+        existing = conn.execute("SELECT prefs_json FROM device_tokens WHERE token = ?", (token,)).fetchone()
+        if existing:
+            prefs = req.prefs if req.prefs is not None else json.loads(existing["prefs_json"] or "{}")
+            conn.execute(
+                "UPDATE device_tokens SET platform = ?, environment = ?, prefs_json = ?, updated_at = ? WHERE token = ?",
+                (req.platform, env, json.dumps(prefs), now, token),
+            )
+        else:
+            prefs = req.prefs if req.prefs is not None else dict(DEFAULT_PUSH_PREFS)
+            conn.execute(
+                "INSERT INTO device_tokens(token, platform, environment, prefs_json, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (token, req.platform, env, json.dumps(prefs), now, now),
+            )
+    return JSONResponse({"ok": True, "prefs": prefs, "push_configured": _apns_configured()})
+
+@app.get("/api/devices/prefs", dependencies=[Depends(require_auth)])
+def get_device_prefs(token: str):
+    with _db() as conn:
+        row = conn.execute("SELECT prefs_json FROM device_tokens WHERE token = ?", (token.strip(),)).fetchone()
+    prefs = json.loads(row["prefs_json"]) if row and row["prefs_json"] else dict(DEFAULT_PUSH_PREFS)
+    return JSONResponse({"prefs": prefs, "defaults": DEFAULT_PUSH_PREFS, "push_configured": _apns_configured()})
+
+@app.post("/api/devices/prefs", dependencies=[Depends(require_auth)])
+def set_device_prefs(req: DevicePrefsReq):
+    token = req.token.strip()
+    prefs = dict(DEFAULT_PUSH_PREFS); prefs.update(req.prefs or {})   # merge over defaults
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _db() as conn:
+        if not conn.execute("SELECT 1 FROM device_tokens WHERE token = ?", (token,)).fetchone():
+            raise HTTPException(404, detail="unknown device token; register first")
+        conn.execute("UPDATE device_tokens SET prefs_json = ?, updated_at = ? WHERE token = ?",
+                     (json.dumps(prefs), now, token))
+    return JSONResponse({"ok": True, "prefs": prefs})
+
+@app.post("/api/devices/test", dependencies=[Depends(require_auth)])
+def test_push(req: DeviceTokenReq):
+    """Fire a test push to one device (bypasses filters) so the app can verify
+    end-to-end delivery."""
+    if not _apns_configured():
+        raise HTTPException(503, detail="APNs not configured on server (.p8 key missing)")
+    with _db() as conn:
+        row = conn.execute("SELECT token, environment FROM device_tokens WHERE token = ?",
+                           (req.token.strip(),)).fetchone()
+    if not row:
+        raise HTTPException(404, detail="unknown device token; register first")
+    code, text = _apns_send(row["token"], row["environment"],
+                            {"aps": {"alert": {"title": "P25 test",
+                                               "body": "Push notifications are working."},
+                                     "sound": "default"}})
+    if code != 200:
+        raise HTTPException(502, detail=f"APNs returned {code}: {text[:200]}")
+    return JSONResponse({"ok": True})
 
 def _incident_transcript_payload(number: int) -> dict:
     """Transmissions attributed to this incident by the summarizer (AI attribution)."""
