@@ -1905,7 +1905,7 @@ def download_logs(auth: dict = Depends(require_auth)):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "log_exists": LOG_FILE.exists()}
+    return {"ok": True, "log_exists": LOG_FILE.exists(), "push_configured": _apns_configured()}
 
 AUDIO_FILTER_FILE = "/tmp/p25_audio_filter"
 
