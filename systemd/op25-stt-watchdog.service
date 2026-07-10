@@ -1,0 +1,7 @@
+[Unit]
+Description=P25 STT wedge watchdog (restart op25 if Whisper thread stalls while decoding)
+After=op25.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/op25_tippecanoe/stt_watchdog.sh
