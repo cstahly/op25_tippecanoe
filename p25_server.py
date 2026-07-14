@@ -1245,8 +1245,8 @@ def _auto_clear_stale_incidents(conn: sqlite3.Connection) -> int:
             continue
         new_priority = max(int(row["priority"]) if row["priority"] is not None else 3, 4)
         conn.execute(
-            "UPDATE incident_state SET status = 'CLEAR', status_kind = 'clear', updated_at = ?, priority = MAX(priority, 4) WHERE number = ?",
-            (now, row["number"]),
+            "UPDATE incident_state SET status = 'CLEAR', status_kind = 'clear', updated_at = ?, priority = ? WHERE number = ?",
+            (now, new_priority, row["number"]),
         )
         cleared += 1
         # If this was an alerted, still-open P1, fire the resolution email and
