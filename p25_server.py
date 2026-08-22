@@ -1768,7 +1768,11 @@ _PUBLIC_CORS = {"Cache-Control": "public, max-age=30", "Access-Control-Allow-Ori
 def public_state():
     """No-auth, read-only snapshot of current incidents + recent radio traffic."""
     with _db() as conn:
-        incidents = incident_rows_from_db(conn)
+        # scope="window" (open incidents + anything cleared in the last 24h), same
+        # as the authenticated /api/state default. Without this it defaulted to
+        # scope="all" and returned the entire history (17k incidents / 10MB by
+        # 2026-08), which hangs the public board/embed while the log still streams.
+        incidents = incident_rows_from_db(conn, scope="window")
         rows = conn.execute(
             "SELECT id, time, talkgroup, agency, raw_line, text, wav_file FROM transmissions ORDER BY id DESC LIMIT 30"
         ).fetchall()
