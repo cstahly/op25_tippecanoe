@@ -971,9 +971,20 @@ def _db():
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_state_db() -> None:
+_schema_ready = False
+
+def init_state_db(force: bool = False) -> None:
+    # Schema DDL only needs to run once. It was being invoked on EVERY request via
+    # ensure_state_ready(), and each `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` takes
+    # an ACCESS EXCLUSIVE lock — so under a slow lock-holder (e.g. a big DELETE) the
+    # per-request ALTERs piled up, exhausted the threadpool, and hung the server
+    # (2026-08-24). Run once, then short-circuit.
+    global _schema_ready
+    if _schema_ready and not force:
+        return
     if DB_BACKEND == "postgres":
         _init_pg_schema()
+        _schema_ready = True
         return
     with _db() as conn:
         conn.executescript("""
@@ -1114,6 +1125,7 @@ def init_state_db() -> None:
                     "UPDATE incident_state SET last_tx_id = ? WHERE number = ? AND last_tx_id = 0",
                     (int(job["to_tx_id"]), number),
                 )
+    _schema_ready = True
 
 def _get_state(conn: sqlite3.Connection, key: str, default: str = "") -> str:
     row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
