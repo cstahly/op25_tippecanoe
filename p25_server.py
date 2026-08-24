@@ -4,7 +4,7 @@ P25 web app backend.
   uvicorn p25_server:app --host 0.0.0.0 --port 8765
 Auth: P25_USER / P25_PASSWORD env vars (defaults: p25 / scanner)
 """
-import base64, hashlib, hmac, html as _html, math, os, re, sys, json, asyncio, secrets, time, sqlite3, urllib.request, urllib.parse
+import base64, hashlib, hmac, html as _html, math, os, re, sys, json, asyncio, secrets, time, sqlite3, threading, urllib.request, urllib.parse
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -563,6 +563,50 @@ def parse_log() -> list[dict]:
             i += 1; continue
         i += 1
     return entries
+
+def parse_log_tail(max_entries: int = 250, tail_bytes: int = 4_000_000) -> list[dict]:
+    """The last `max_entries` log entries, parsed from only the tail of the file.
+    Mirrors parse_log()'s entry shapes but reads ~tail_bytes instead of the whole
+    multi-100MB log — the feed only ever shows the last couple hundred. tx ids are
+    numbered from the global tx count so they match a full parse for the recent tail."""
+    if not LOG_FILE.exists():
+        return []
+    size = LOG_FILE.stat().st_size
+    with open(LOG_FILE, "rb") as f:
+        start = max(0, size - tail_bytes)
+        f.seek(start)
+        data = f.read()
+    if start > 0:
+        nl = data.find(b"\n")                 # drop the partial first line
+        data = data[nl + 1:] if nl != -1 else b""
+    lines = data.decode("utf-8", "replace").splitlines()
+    tail_tx = sum(1 for ln in lines if TX_RE.match(ln))
+    total_tx = _log_sync["tx_count"] or tail_tx
+    tx_count = max(1, total_tx - tail_tx + 1)   # global id of the first tail tx line
+    entries: list[dict] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = TX_RE.match(line)
+        if m:
+            tg = m.group(2)
+            e = {"type":"tx","id":f"tx-{tx_count}","time":m.group(1),"talkgroup":tg,
+                 "agency":_agency(tg),"trunk":m.group(3) or _trunk(tg),"text":m.group(5)}
+            if m.group(4):
+                e["wav_file"] = m.group(4)
+            entries.append(e); tx_count += 1; i += 1; continue
+        ms = SUMMARY_START.match(line) or FULL_SUMMARY_START.match(line)
+        if ms:
+            is_full = bool(FULL_SUMMARY_START.match(line))
+            body, i = [], i + 1
+            while i < len(lines) and not lines[i].startswith(SUMMARY_END):
+                body.append(lines[i]); i += 1
+            entries.append({"type":"summary","id":f"sum-{len(entries)}",
+                            "time":ms.group(1),"text":"\n".join(body).strip(),
+                            "full": is_full})
+            i += 1; continue
+        i += 1
+    return entries[-max_entries:]
 
 def _clean_md(text: str) -> str:
     text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
@@ -1162,36 +1206,62 @@ def _last_valid_summary_tx_id_from_log() -> int:
         i += 1
     return last_summary_tx
 
-def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
-    """Incrementally append new log lines to the transmissions table.
+# Byte-offset cursor into the log so each sync parses ONLY the bytes appended
+# since last time — not the whole file. Reparsing the entire multi-100MB log on
+# every request saturated the threadpool and hung the server (2026-08-24).
+_log_sync = {"offset": 0, "tx_count": 0}
+_log_sync_lock = threading.Lock()
 
-    Tx ids are stable (append-only) so incident_tx attribution stays valid.
-    If the log shrank (rotation/manual edit), fall back to a full rebuild —
-    incident_tx rows keep their (time, talkgroup) fallback columns for that case.
-    """
-    rows = []
-    if LOG_FILE.exists():
-        for line in LOG_FILE.read_text(errors="replace").splitlines():
+def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
+    """Append new log lines to the transmissions table, parsing ONLY the bytes
+    appended since the last call (tracked by byte offset). Tx ids are the 1-based
+    position of each TX_RE line and stay stable (append-only), so incident_tx
+    attribution stays valid. On a shrink/rotation (file smaller than our cursor),
+    fall back to re-reading from the top. Serialized so concurrent requests don't
+    each parse the appended tail."""
+    if not LOG_FILE.exists():
+        return _log_sync["tx_count"]
+    with _log_sync_lock:
+        try:
+            size = LOG_FILE.stat().st_size
+        except OSError:
+            return _log_sync["tx_count"]
+        # Shrink/rotation, or cold module cache after a restart: start from the top.
+        # (ON CONFLICT keeps ids stable, so a cold re-read is a safe one-time cost.)
+        if size < _log_sync["offset"]:
+            sys.stderr.write(f"[tx-sync] log shrank ({size} < {_log_sync['offset']}) — re-reading from top\n")
+            conn.execute("DELETE FROM transmissions")
+            _log_sync["offset"] = 0
+            _log_sync["tx_count"] = 0
+        if size == _log_sync["offset"]:
+            return _log_sync["tx_count"]           # nothing appended
+        with open(LOG_FILE, "rb") as f:
+            f.seek(_log_sync["offset"])
+            data = f.read()
+        nl = data.rfind(b"\n")
+        if nl == -1:
+            return _log_sync["tx_count"]            # no complete new line yet
+        text = data[:nl + 1].decode("utf-8", "replace")
+        tx_count = _log_sync["tx_count"]
+        new_rows = []
+        for line in text.splitlines():
             m = TX_RE.match(line)
             if not m:
                 continue
-            tx_id = len(rows) + 1
+            tx_count += 1
             tg = m.group(2)
-            rows.append((tx_id, m.group(1), tg, _agency(tg), m.group(5), m.group(4), line))
-    existing = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM transmissions").fetchone()["m"]
-    if len(rows) < existing:
-        sys.stderr.write(f"[tx-sync] log shrank ({len(rows)} < {existing}) — full rebuild, tx ids may shift\n")
-        conn.execute("DELETE FROM transmissions")
-        existing = 0
-    new_rows = rows[existing:]
-    # OR IGNORE: concurrent ensure_state_ready() calls race on the same new
-    # rows; ids are deterministic (log position) so dropping dupes is safe.
-    conn.executemany(
-        "INSERT INTO transmissions(id, time, talkgroup, agency, text, wav_file, raw_line) VALUES(?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(id) DO NOTHING",
-        new_rows,
-    )
-    return len(rows)
+            new_rows.append((tx_count, m.group(1), tg, _agency(tg), m.group(5), m.group(4), line))
+        if new_rows:
+            # ON CONFLICT DO NOTHING: a cold-cache re-read replays existing ids
+            # harmlessly; ids are deterministic (log position).
+            conn.executemany(
+                "INSERT INTO transmissions(id, time, talkgroup, agency, text, wav_file, raw_line) VALUES(?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO NOTHING",
+                new_rows,
+            )
+        _log_sync["offset"] += (nl + 1)
+        _log_sync["tx_count"] = tx_count
+        return tx_count
 
 def incident_rows_from_db(conn: sqlite3.Connection, scope: str = "all") -> list[dict]:
     # scope="window": light default for the live poll — every open incident (any
@@ -1900,14 +1970,15 @@ def get_state(scope: str = "window"):
     ensure_state_ready()
     scope = "all" if scope == "all" else "window"  # default light; "all" on demand
     stat = LOG_FILE.stat() if LOG_FILE.exists() else None
-    entries = parse_log()
+    feed = parse_log_tail(250)   # tail only — full parse_log() was ~6s on the 100MB log
     with _db() as conn:
         incidents = incident_rows_from_db(conn, scope=scope)
-    feed = entries[-250:]
     return JSONResponse({
         "entries": feed,
         "entries_latest": list(reversed(feed)),
-        "incidents": incidents or derive_incidents(entries),
+        # derive_incidents fallback needs the full log, but only fires when the DB
+        # projection is empty (effectively never once incidents exist).
+        "incidents": incidents or derive_incidents(parse_log()),
         "log_size": stat.st_size if stat else 0,
         "log_mtime": stat.st_mtime if stat else 0,
     }, headers={"Cache-Control": "no-store"})
