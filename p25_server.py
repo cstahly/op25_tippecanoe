@@ -1263,7 +1263,7 @@ def sync_transmissions_from_log(conn: sqlite3.Connection) -> int:
         _log_sync["tx_count"] = tx_count
         return tx_count
 
-def incident_rows_from_db(conn: sqlite3.Connection, scope: str = "all") -> list[dict]:
+def incident_rows_from_db(conn: sqlite3.Connection, scope: str = "all", cleared_hours: int = 24) -> list[dict]:
     # scope="window": light default for the live poll — every open incident (any
     # age) plus anything cleared in the last 24h. Covers all default board/map
     # views; the full history is only fetched when the user picks "All".
@@ -1271,7 +1271,8 @@ def incident_rows_from_db(conn: sqlite3.Connection, scope: str = "all") -> list[
     if scope == "window":
         # Compute the 24h cutoff in Python (portable text compare) instead of a
         # backend-specific datetime() call. last_seen is "YYYY-MM-DD HH:MM:SS" (sortable).
-        cutoff = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        # cleared_hours: how far back cleared incidents reach (iOS asks for 1h..30d).
+        cutoff = (datetime.now() - timedelta(hours=cleared_hours)).strftime("%Y-%m-%d %H:%M:%S")
         where = "WHERE i.status_kind != 'clear' OR i.last_seen >= ? "
         params = (cutoff,)
     rows = conn.execute(
@@ -1966,19 +1967,24 @@ def get_hotspots_public(min_count: int = 3, eps_m: int = 300):
                         headers={"Cache-Control": "public, max-age=300"})
 
 @app.get("/api/state", dependencies=[Depends(require_auth)])
-def get_state(scope: str = "window"):
+def get_state(scope: str = "window", hours: int = 24, lite: int = 0):
+    # hours: open incidents (any age) + incidents cleared in the last N hours (1..720).
+    # lite=1: incidents only; skip the log-tail feed (~125KB the iOS app never reads).
     ensure_state_ready()
     scope = "all" if scope == "all" else "window"  # default light; "all" on demand
+    hours = max(1, min(int(hours), 720))
     stat = LOG_FILE.stat() if LOG_FILE.exists() else None
-    feed = parse_log_tail(250)   # tail only — full parse_log() was ~6s on the 100MB log
+    feed = [] if lite else parse_log_tail(250)   # tail only — full parse_log() was ~6s on the 100MB log
     with _db() as conn:
-        incidents = incident_rows_from_db(conn, scope=scope)
+        incidents = incident_rows_from_db(conn, scope=scope, cleared_hours=hours)
     return JSONResponse({
         "entries": feed,
         "entries_latest": list(reversed(feed)),
-        # derive_incidents fallback needs the full log, but only fires when the DB
-        # projection is empty (effectively never once incidents exist).
-        "incidents": incidents or derive_incidents(parse_log()),
+        # DB only. The old derive_incidents(parse_log()) fallback ran whenever the 24h
+        # window was empty (e.g. while transcription was down), re-parsing the whole
+        # 170MB log on every poll; overlapping polls held several 1.3M-entry copies
+        # and got the server OOM-killed (2026-10-19).
+        "incidents": incidents,
         "log_size": stat.st_size if stat else 0,
         "log_mtime": stat.st_mtime if stat else 0,
     }, headers={"Cache-Control": "no-store"})
