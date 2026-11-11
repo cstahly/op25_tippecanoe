@@ -1989,6 +1989,28 @@ def get_state(scope: str = "window", hours: int = 24, lite: int = 0):
         "log_mtime": stat.st_mtime if stat else 0,
     }, headers={"Cache-Control": "no-store"})
 
+@app.get("/api/incidents/histogram", dependencies=[Depends(require_auth)])
+def incident_histogram(hours: int = 168):
+    """Cleared incidents per hour (by last_seen) for the iOS time slider.
+    counts[0] is the most recent hour. ~1 KB for a week."""
+    ensure_state_ready()
+    hours = max(1, min(int(hours), 720))
+    now = datetime.now()
+    cutoff = (now - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT last_seen FROM incident_state WHERE status_kind = 'clear' AND last_seen >= ?",
+            (cutoff,),
+        ).fetchall()
+    counts = [0] * hours
+    for row in rows:
+        dt = _parse_dt(row["last_seen"])
+        if dt:
+            idx = int((now - dt).total_seconds() // 3600)
+            if 0 <= idx < hours:
+                counts[idx] += 1
+    return JSONResponse({"hours": hours, "counts": counts}, headers={"Cache-Control": "no-store"})
+
 @app.get("/api/logs/download")
 def download_logs(auth: dict = Depends(require_auth)):
     if not LOG_FILE.exists():
